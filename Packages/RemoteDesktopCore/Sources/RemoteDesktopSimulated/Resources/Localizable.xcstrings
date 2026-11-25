@@ -1,0 +1,19 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Built-in Display" : {},
+    "Clipboard sharing is switched off for this computer." : {},
+    "Demo" : {},
+    "External Display" : {},
+    "Screen 0" : {},
+    "Simulated" : {},
+    "simulated transport carries no data" : {},
+    "The server offers no login that proves its identity." : {},
+    "The server offers no mode usable on this connection." : {},
+    "The server would not encrypt the session." : {},
+    "The user name or password is incorrect." : {},
+    "Virtual Display" : {},
+    "Virtual Display #%lld" : {}
+  },
+  "version" : "1.0"
+}

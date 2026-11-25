@@ -1,0 +1,22 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "An SSH tunnel carries streams only." : {},
+    "Could not reach %@: %@" : {},
+    "invalid port %u" : {},
+    "name lookup failed (%d)" : {},
+    "name lookup failed: %@" : {},
+    "no usable address for %@" : {},
+    "SSH key" : {},
+    "SSH key login failed: %@" : {},
+    "SSH password login failed: %@" : {},
+    "the default" : {},
+    "The password is incorrect." : {},
+    "The SSH handshake with %@ failed: %@" : {},
+    "The SSH server closed the connection: %@" : {},
+    "the SSH server could not connect to %@:%u (%@)" : {},
+    "The SSH server did not accept the login." : {},
+    "The SSH server presented no host key." : {}
+  },
+  "version" : "1.0"
+}

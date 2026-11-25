@@ -1,0 +1,10 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "could not create local sockets: %@" : {},
+    "LibVNCClient could not create a client" : {},
+    "the server ended the handshake" : {},
+    "the server sent something the client could not read" : {}
+  },
+  "version" : "1.0"
+}

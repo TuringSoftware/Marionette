@@ -1,0 +1,17 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Clipboard sharing is switched off for this computer." : {},
+    "Plain VNC cannot prove that this is the computer it says it is." : {},
+    "Plain VNC does not encrypt the session." : {},
+    "Port %u is in use on this device." : {},
+    "Screen" : {},
+    "The connection did not survive the app being in the background." : {},
+    "The password was not accepted." : {},
+    "The server closed the connection." : {},
+    "The server takes no more attempts for now." : {},
+    "VNC through a tunnel" : {},
+    "VNC, not encrypted" : {}
+  },
+  "version" : "1.0"
+}

@@ -1,0 +1,16 @@
+[submodule "Packages/SwiftSRTP/Sources/CLibSRTP/libsrtp"]
+	path = Packages/SwiftSRTP/Sources/CLibSRTP/libsrtp
+	url = https://github.com/cisco/libsrtp.git
+	shallow = true
+[submodule "ThirdParty/openssl"]
+	path = ThirdParty/openssl
+	url = https://github.com/openssl/openssl.git
+	shallow = true
+[submodule "Packages/SwiftSSH2/Sources/CLibSSH2/libssh2"]
+	path = Packages/SwiftSSH2/Sources/CLibSSH2/libssh2
+	url = https://github.com/libssh2/libssh2.git
+	shallow = true
+[submodule "Packages/SwiftVNCClient/Sources/CLibVNCClient/libvncserver"]
+	path = Packages/SwiftVNCClient/Sources/CLibVNCClient/libvncserver
+	url = https://github.com/LibVNC/libvncserver.git
+	shallow = true

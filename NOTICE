@@ -1,0 +1,37 @@
+Marionette
+Copyright © 2026 Turing Software, LLC
+
+This product includes or builds on the following third-party work.
+
+libsrtp — https://github.com/cisco/libsrtp
+  Copyright © 2001–2017 Cisco Systems, Inc. BSD 3-Clause License.
+  Compiled from source in Packages/SwiftSRTP (git submodule, unmodified).
+
+libssh2 — https://github.com/libssh2/libssh2
+  Copyright © 2004–2023 Sara Golemon, Daniel Stenberg, Simon Josefsson, The Written Word, Inc.
+  and others (see the submodule's COPYING). BSD 3-Clause License.
+  Compiled from source in Packages/SwiftSSH2 (git submodule, unmodified).
+
+OpenSSL — https://github.com/openssl/openssl
+  Copyright © 1998–2026 The OpenSSL Project Authors. Apache License 2.0.
+  Built from source by Scripts/build-deps.sh (git submodule in ThirdParty/openssl, unmodified).
+
+LibVNCServer (its client half, LibVNCClient) — https://github.com/LibVNC/libvncserver
+  Copyright © 1999 AT&T Laboratories Cambridge; © 2000–2002 Constantin Kaplinsky;
+  © 2001–2003 Johannes E. Schindelin and others (see the submodule's AUTHORS).
+  GNU General Public License, version 2 or later; used here under version 3.
+  Compiled from source in Packages/SwiftVNCClient (git submodule, unmodified).
+
+BigInt — https://github.com/attaswift/BigInt
+  Copyright © 2016–2017 Károly Lőrentey. MIT License.
+
+remotex — https://github.com/andrewtheguy/remotex
+  Copyright © 2026 Andrew Chen. MIT License.
+  Protocol description and constants for Apple's Screen Sharing protocol. Message layouts in
+  Packages/AppleScreenSharing follow its documentation and source; files that do say so.
+
+rootshell-vnc — https://github.com/kitknox/rootshell-vnc
+  Copyright © 2026 Rootshell LLC, Kit Knox. MIT License.
+  Behaviour and algorithms adapted from it, each marked in the file that uses it: the receive
+  bandwidth estimator and its test vectors, the SOCKS5 connect path, reorder and audio
+  jitter-buffer timing, decode-stall detection, clipboard type mapping and the SSH tunnel window.
