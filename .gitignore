@@ -4,6 +4,7 @@
 DerivedData/
 DerivedData-*/
 xcuserdata/
+.claude/settings.local.json
 *.xcuserstate
 ThirdParty/build/
 /Artifacts/

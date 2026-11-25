@@ -8,6 +8,11 @@ Marionette follows Apple's [Human Interface Guidelines](https://developer.apple.
 Check the relevant HIG page before designing a screen or control, and prefer the system's own
 components, placements and behaviours over custom ones.
 
+Where a behaviour is a choice (what a gesture does, what a command is called, which mode is the
+default), do what the Screen Sharing app on a Mac does.
+
+When the system offers no API for something, leave the feature out; do not work around the system.
+
 - **Views are thin.** A view takes a model (`SessionModel`, `AppEnvironment`) and calls its intent
   methods. Logic lives in `MarionetteKit` and below, where it can be unit-tested; the app target has
   no view models of its own.
@@ -23,6 +28,13 @@ components, placements and behaviours over custom ones.
   `#available(iOS 27.1, *)` with a fallback that has the same children. Read the pose from
   `reservedRegions(kind: .division)`, never from the hinge angle.
 
+### Wording
+
+- Keep text short. Before explaining a control in words, ask whether the control could explain
+  itself. Settings are not help pages.
+- Text does not change with state unless it must, as in an error message.
+- A menu or button title fits on one line.
+
 ### Accessibility
 
 - Every interactive element has a stable kebab-case `accessibilityIdentifier` (`remote-display`,
@@ -37,6 +49,15 @@ components, placements and behaviours over custom ones.
 - Gate every animation on Reduce Motion.
 - Never convey meaning by colour alone. Custom colours are defined once in a `Color` extension and
   checked for contrast in light and dark.
+
+## SwiftUI and UIKit
+
+- `updateUIView` only records what changed. A UIKit call that makes the system lay out or ask for
+  input views again (`reloadInputViews`, `becomeFirstResponder`) runs on the next turn of the main
+  queue; called inside the update it re-enters SwiftUI's graph and the app freezes.
+- A view that must not take touches is removed from the tree, not left at zero opacity.
+- A `confirmationDialog` or popover for one item of a collection is attached to that item, so that
+  it points at it on iPad.
 
 ## Swift
 
@@ -79,6 +100,11 @@ components, placements and behaviours over custom ones.
   `LocalizedStringKey` literal in a view), with a String Catalog per target. Write whole sentences per
   variant and use the catalog's plural variations; never build a sentence from fragments. Identifiers,
   file names and diagnostics are not localized. Use typographic quotes and apostrophes.
+  - Interpolate text. A value that is not text, such as an `Error`, compiles with a warning and
+    puts its debug description in front of the user; convert it first.
+  - `#bundle` cannot be a public default argument; take an optional and resolve it in the body.
+  - Xcode updates the catalogs when it builds. After a build from the command line, run
+    `Scripts/sync-string-catalogs.py`.
 
 ## Dependencies
 
@@ -135,6 +161,14 @@ Comments are documentation, not notes. Each one must tell the reader something t
   The reason stays; the story goes.
 
 Write in the present tense, briefly, in British English, with units on every measurement.
+
+## Documentation
+
+Documents under `Docs/` are reference: organised by topic, in the present tense, and held to the
+rules for comments above. They carry no progress logs, dates, plans or development history, and
+nothing a reader gets as easily from the code. A fact about Apple's protocol goes in the
+[protocol reference](protocol/apple-screen-sharing.md) with how it is known, and is taken from what a
+Mac did, not from this code.
 
 ## Testing
 

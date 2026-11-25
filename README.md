@@ -43,7 +43,7 @@ open Marionette.xcodeproj     # choose your team under Signing & Capabilities, t
 ```
 
 The Xcode project is generated from `project.yml` and is not checked in; run `xcodegen generate` after
-changing that file. To sign from the command line, pass `MARIONETTE_PROVISIONING_PROFILE=<uuid>` to
+changing that file or adding, moving or removing a source file. To sign from the command line, pass `MARIONETTE_PROVISIONING_PROFILE=<uuid>` to
 `xcodebuild` in place of `PROVISIONING_PROFILE`.
 
 On the Mac you connect to, turn on **Screen Sharing** (System Settings › General › Sharing). Turn on
@@ -51,10 +51,13 @@ On the Mac you connect to, turn on **Screen Sharing** (System Settings › Gener
 
 ## Documentation
 
+- [Architecture](Docs/architecture.md): the layers, the packages and the decisions behind them.
 - [Testing](Docs/testing.md): unit, UI, screenshot and live tests, and `marionettectl`.
+- [Test machines](Docs/test-machines.md): setting up the Macs and VNC servers the live tests use.
 - [Apple Screen Sharing protocol](Docs/protocol/apple-screen-sharing.md): what the app relies on, and
   how each part was verified.
 - [Coding guide](Docs/coding-guide.md)
+- [Contributing](CONTRIBUTING.md): what a pull request needs, and how AI assistance is attributed.
 
 ## Licence
 

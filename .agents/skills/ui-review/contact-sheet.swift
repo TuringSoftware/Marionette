@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Tiles screenshots into one captioned image, for reviewing a set at a glance.
-//   swift Scripts/contact-sheet.swift <out.png> <cell width> <columns> <image>...
+//   swift contact-sheet.swift <out.png> <cell width> <columns> <image>...
 import CoreGraphics
 import CoreText
 import Foundation
