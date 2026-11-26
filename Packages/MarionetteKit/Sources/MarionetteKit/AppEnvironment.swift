@@ -45,8 +45,12 @@ public struct LaunchOptions: Sendable, Hashable {
     /// prompts that wait for the app to have been used. On a real device this replaces what the app
     /// had counted and been told.
     public var sessionCount: Int?
+    /// `-MarionetteHDRScreen`: the session's window is on a screen that shows HDR (UI tests; a
+    /// simulator's screen may say it does not).
+    public var isHDRScreenOverride = false
     /// `-MarionetteDiagnostics`: the remote display's accessibility value carries what tests read
-    /// (zoom, display size, input received), also against a real computer. Implied by UI-test mode.
+    /// (zoom, display size, input received), also against a real computer, and the Apple back end
+    /// prints its trace to the console. Implied by UI-test mode.
     public var reportsDiagnostics: Bool { isUITestMode || wantsDiagnostics }
     /// Whether the app may ask for a review or a donation. Not where `-MarionetteDiagnostics` was
     /// asked for: that is a test against a real computer, in an app that has counted its earlier
@@ -75,6 +79,7 @@ public struct LaunchOptions: Sendable, Hashable {
             case "-MarionetteWindowed": isWindowedOverride = true
             case "-MarionetteThumbnails": thumbnailFolder = iterator.next().map { URL(fileURLWithPath: $0, isDirectory: true) }
             case "-MarionetteSessionCount": sessionCount = iterator.next().flatMap { Int($0) }
+            case "-MarionetteHDRScreen": isHDRScreenOverride = true
             case "-MarionetteDiagnostics": wantsDiagnostics = true
             default: break
             }
@@ -177,7 +182,7 @@ public final class AppEnvironment {
     /// Application Support, and the real back ends over a direct network path or an SSH tunnel. The
     /// demo computer keeps using the simulated back end. Computers nearby are found with Bonjour.
     public static func live(options: LaunchOptions = LaunchOptions(), pasteboard: any LocalPasteboard) -> AppEnvironment {
-        let registry = liveRegistry()
+        let registry = liveRegistry(printsTrace: options.reportsDiagnostics)
         let container: ModelContainer
         do {
             container = try ComputerRepository.makeContainer(inMemory: false)
@@ -209,12 +214,16 @@ public final class AppEnvironment {
     /// The back ends of the live environment: Screen Sharing for Macs, VNC for everything else (and
     /// as a Mac's last resort), and the simulated one for the demo computer. No fallback: a computer
     /// whose back end is missing fails with an explanation rather than connect to something else.
-    public static func liveRegistry() -> BackendRegistry {
+    /// `printsTrace`: the Apple back end prints what it does and what the Mac says, as
+    /// `marionettectl --trace` does, for reading from a device's console.
+    public static func liveRegistry(printsTrace: Bool = false) -> BackendRegistry {
         var registry = BackendRegistry()
         var demo = SimulationScenario.highPerformance
         demo.playsTone = false
         registry.register(SimulatedBackend(scenario: demo))
-        registry.register(AppleScreenSharingBackend())
+        var apple = AppleScreenSharingBackend()
+        if printsTrace { apple.diagnostics = { print("marionette: " + $0) } }
+        registry.register(apple)
         registry.register(VNCBackend())
         return registry
     }

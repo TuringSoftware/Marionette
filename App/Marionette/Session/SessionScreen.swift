@@ -171,6 +171,9 @@ struct SessionScreen: View {
                         Image(systemName: "lock.open")
                     }
                 }
+                if session.isShowingHDR {
+                    Label("HDR", systemImage: "sun.max")
+                }
                 if case .unavailable(let reason) = session.features.audio {
                     Label {
                         Text("No Sound")

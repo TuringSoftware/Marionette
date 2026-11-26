@@ -442,8 +442,8 @@ Rules:
 
 - SRTP `AES_CM_256_HMAC_SHA1_80`, RTCP on the same port.
 - Payload type 100: HEVC Range Extensions, 8-bit 4:4:4, level 5.1, full range, BT.709 matrix, sRGB
-  transfer, Display P3 primaries. With one tile per frame it arrives as standard RFC 7798 packets on
-  one SSRC; ffmpeg decodes a dump without error.
+  transfer, Display P3 primaries; 10-bit with PQ for an HDR display (see [HDR](#hdr)). With one tile
+  per frame it arrives as standard RFC 7798 packets on one SSRC; ffmpeg decodes a dump without error.
 - Each picture packet's header extension, with flag `0x01`, carries a word with the picture's packet
   count and its running number. Over 723 pictures that arrived whole the count matched every time,
   so a picture right after a gap is whole if its count is met.
@@ -527,6 +527,37 @@ the constrained profile, is accepted: the Mac configured `TXMinBitrate = 333000`
 switching the same connection to the constrained profile (a new display configuration and offer) gave
 a first picture 2 s later, then no loss. On the Mac mini the constrained profile ran at 2880 × 1792,
 42 pictures/s.
+
+### HDR
+
+Both machines, macOS 27 and macOS 15.6, send 10-bit HDR pictures for a virtual display asked for in
+HDR.
+
+- **Asking.** Each mode in a display descriptor ends with a `u32` HDR word (offset `0x18` of the
+  mode). Apple's viewer sets it to 1 on every mode of an HDR display, the four presets included
+  *(static analysis: `-[SSSession stConfigureVirtualDisplaysWithDimensions:]`)*.
+- **The Mac's answer.** In the port message, bit 1 (`0x2`) of a picture port's flags word says its
+  display is HDR. It was clear for the SDR opening display and set once the display had been asked
+  for in HDR. Apple's viewer offers HDR pictures for a leg only when that bit is set, the second
+  leg by its own word *(static analysis: `-[SSSession handleAVCMediaEncoding:]`)*.
+- **Offering.** Field 9 of the offer's stream message is a bitmap of the HDR modes the viewer takes:
+  `1` is SDR alone, as Apple's viewer sends without HDR; `9` adds mode 3. Offered 9 for a port
+  marked HDR, the Mac's `avconferenced` logged `vcMediaStreamHDRMode = 3` and its encoder "Got 10b
+  input … HEVC_Main44410_AutoLevel/bitdepth10".
+- **Pictures.** HEVC Range Extensions Main 4:4:4 10, full range, BT.709 matrix, Display P3
+  primaries, PQ transfer. The desktop's white is at 100 nits (PQ code 519–520 of 1023), so a viewer
+  maps 100 nits to its SDR white.
+- **Changing.** A dynamic `SetDisplayConfiguration` that changes only the HDR word is answered like a
+  resize (layout, port message with the new bit, offer, answer), in 1.1–1.6 s on both machines. The
+  pictures change bit depth with the new stream.
+- **Rate.** The encoder's target stays at 58.4 Mbit/s. On an idle desktop an HDR keyframe was 93 KB
+  against 176–198 KB in SDR. At 1 % loss each way the 10-bit stream recovered with refresh pictures
+  as an SDR one does. `avconferenced` reads the HDR mode only when it configures a stream, never in
+  its rate control *(static analysis)*, so a Mac does not fall back to 8-bit by itself.
+- **Apple's viewer** offers HDR only as "reference HDR mode", which a person turns on, on a virtual
+  display ("Cannot enable HDR Reference mode unless using virtual display"), and while its window is
+  on a display with the HDR video reference preset selected *(static analysis:
+  `SSVirtualDisplayLocalDisplayMonitor`, `-[SSSessionView setReferenceHDRModeEnabled:]`)*.
 
 ### Addresses and ports
 
@@ -894,7 +925,7 @@ A viewer that answers the Mac's `003.889` with `003.008` (LibVNCClient does) get
 - `0x15` (accessibility), `0x23` and `0x51` are advertised by Apple's viewer as messages it accepts;
   none was seen in a capture.
 - Session-select command 1, and the undescribed command 3 offered to a VNC-password guest.
-- HDR in High Performance, and High Performance from wayshare on a real Hyprland output.
+- High Performance from wayshare on a real Hyprland output.
 
 ## Tools
 

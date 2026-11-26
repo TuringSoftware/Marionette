@@ -41,6 +41,72 @@ final class SessionFlowTests: XCTestCase {
         app.buttons["computer-Studio Mac"].waitToExist()
     }
 
+    /// A display fitted to an HDR screen is HDR, and the title menu says so under the connection.
+    /// The Studio Mac shows the Mac's own displays, which are never HDR, until it fits this device.
+    @MainActor
+    func testTheTitleMenuSaysHDROnlyWhileADisplayIsHDR() {
+        let app = XCUIApplication.marionette(extra: ["-MarionetteHDRScreen"])
+        func openTitleMenu() {
+            let bar = app.navigationBars.firstMatch
+            let title = bar.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Studio Mac")).firstMatch
+            if title.exists { title.tap() } else { bar.staticTexts["Studio Mac"].firstMatch.waitToExist().tap() }
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Direct Connection")).firstMatch.waitToExist()
+        }
+
+        app.buttons["computer-Studio Mac"].waitToExist().tap()
+        XCTAssertTrue(app.waitForRemoteDisplay(containing: "High Performance"))
+        openTitleMenu()
+        XCTAssertFalse(app.buttons["HDR"].exists, "the Mac's own displays are SDR")
+        // Away from the menu to close it, then out of the session.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)).tap()
+        app.buttons["close-session"].waitToExist().tap()
+
+        // Just after a session closes, a long press sometimes opens no context menu on iPad.
+        let edit = app.buttons["Edit"]
+        for _ in 0..<3 {
+            app.buttons["computer-Studio Mac"].waitToExist().press(forDuration: 1.0)
+            if edit.waitForExistence(timeout: 3) { break }
+        }
+        edit.waitToExist().tap()
+        let display = app.staticTexts["Display"]
+        for _ in 0..<4 where !display.isHittable { app.swipeUp() }
+        display.waitToExist().tap()
+        // On a short screen (the iPhone Duo's outer display) the section opens below the fold.
+        let show = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Show")).firstMatch
+        for _ in 0..<4 where !show.waitForExistence(timeout: 1) { app.swipeUp() }
+        show.waitToExist().tap()
+        app.buttons["Fit This Device"].waitToExist().tap()
+        // Scrolled down, the sheet's bar leaves its buttons out of the hierarchy.
+        let save = app.buttons["Save"]
+        for _ in 0..<4 where !save.waitForExistence(timeout: 1) { app.swipeDown() }
+        save.waitToExist().tap()
+
+        app.buttons["computer-Studio Mac"].waitToExist().tap()
+        XCTAssertTrue(app.waitForRemoteDisplay(containing: "High Performance"))
+        // HDR follows the screen's report once the session is up, a display change later; the
+        // menu shows what was true when it opened, so it is opened again until the row comes.
+        for _ in 0..<5 {
+            openTitleMenu()
+            if app.buttons["HDR"].waitForExistence(timeout: 2) { break }
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)).tap()
+        }
+        XCTAssertTrue(app.buttons["HDR"].exists)
+
+        // Turned off in the More menu, the display goes back to SDR, and the title menu says so.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)).tap()
+        app.buttons["more-menu"].waitToExist().tap()
+        app.descendants(matching: .any)["high-dynamic-range"].waitToExist().tap()
+        // The menu shows what was true when it opened, so it is opened again until the row goes.
+        let hdrRow = app.buttons["HDR"]
+        for _ in 0..<5 {
+            openTitleMenu()
+            let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: hdrRow)
+            if XCTWaiter().wait(for: [gone], timeout: 2) == .completed { break }
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)).tap()
+        }
+        XCTAssertFalse(hdrRow.exists)
+    }
+
     @MainActor
     func testWrongPasswordShowsInlineErrorThenConnects() {
         let app = XCUIApplication.marionette(scenario: "bad-password", autoConnect: true)

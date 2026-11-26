@@ -211,7 +211,8 @@ final class SimulatedSessionCore: Sendable, InputSink {
                 SimulationScenario.Display(
                     name: index == 0 ? String(localized: "Virtual Display", bundle: #bundle) : String(localized: "Virtual Display #\(index + 1)", bundle: #bundle),
                     pixelSize: PixelSize(width: request.pointSize.width * request.scale, height: request.pointSize.height * request.scale),
-                    scale: Double(request.scale)
+                    scale: Double(request.scale),
+                    isHDR: request.wantsHDR && scenario.makesHDRDisplays
                 )
             }
             await engine.configure(core: self, displays: displays, kind: .virtual)
@@ -544,7 +545,7 @@ actor SimulatedEngine {
         var hubs: [DisplayID: FrameHub] = [:]
         var newScreens: [Screen] = []
         for (index, display) in displays.enumerated() {
-            guard let canvas = SimulatedCanvas(pixelSize: display.pixelSize, scale: display.scale) else { continue }
+            guard let canvas = SimulatedCanvas(pixelSize: display.pixelSize, scale: display.scale, isHDR: display.isHDR) else { continue }
             // Identity is positional and stable across resizes, so consumers keep their subscription.
             let id = DisplayID(UInt32(index + 1))
             let remote = RemoteDisplay(
@@ -552,7 +553,8 @@ actor SimulatedEngine {
                 name: display.name,
                 kind: kind,
                 frameInDesktop: PixelRect(x: x, y: 0, width: display.pixelSize.width, height: display.pixelSize.height),
-                scale: display.scale
+                scale: display.scale,
+                isHDR: display.isHDR
             )
             x += display.pixelSize.width
             let hub = screens.first { $0.display.id == id }?.hub ?? FrameHub()

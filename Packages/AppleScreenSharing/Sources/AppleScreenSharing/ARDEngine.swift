@@ -36,6 +36,11 @@ actor ARDEngine {
         var unansweredOffers = 0
         /// Tags the change or offer now out, so that the timer of an earlier one does nothing.
         var requestSerial: UInt64 = 0
+        /// Displays asked for HDR may have it: the device takes HDR pictures and the stream has not
+        /// stepped down to the constrained profile.
+        var allowsHDR: Bool
+        /// Which picture ports the Mac marked HDR when it last named them.
+        var hdrPorts: [Bool] = []
     }
 
     private enum Waiter {
@@ -130,6 +135,7 @@ actor ARDEngine {
         } else {
             core.note("the Mac's displays: " + requests.map { "\($0.pointSize.width) × \($0.pointSize.height) pt @\($0.scale)x" }.joined(separator: ", "))
         }
+        for index in requests.indices { requests[index].wantsHDR = core.options.wantsHDR }
         beginHighPerformance(requests: requests)
     }
 
@@ -162,8 +168,9 @@ actor ARDEngine {
         guard let core else { return }
         var offer = Self.makeOffer(legs: requests.count, codec: core.videoCodec)
         offer.bandwidthProfile = core.timing.bandwidthProfile
-        let desired = requests.map { Self.mode(for: $0, profile: offer.bandwidthProfile) }
-        highPerformance = HighPerformance(offer: offer, requests: requests, desired: desired)
+        let allowsHDR = core.allowsHDR && offer.bandwidthProfile == .full
+        let desired = requests.map { Self.mode(for: $0, profile: offer.bandwidthProfile, allowsHDR: allowsHDR) }
+        highPerformance = HighPerformance(offer: offer, requests: requests, desired: desired, allowsHDR: allowsHDR)
         core.note("asking for \(core.videoCodec == .hevc ? "HEVC 4:4:4" : "H.264") pictures")
         // Every virtual display is created at one canonical mode first; the session's own size
         // follows once the stream has been agreed for it. That lets macOS restore the displays'
@@ -187,7 +194,7 @@ actor ARDEngine {
     /// multiple of 16 points on each side (a 1440 × 900 pt display came as 2880 × 1824 pixels), and
     /// a picture larger than its display would never show; such displays are asked for in whole
     /// multiples of 16 points instead.
-    private static func mode(for request: VirtualDisplayRequest, profile: MediaOffer.BandwidthProfile) -> VirtualDisplayMode {
+    private static func mode(for request: VirtualDisplayRequest, profile: MediaOffer.BandwidthProfile, allowsHDR: Bool) -> VirtualDisplayMode {
         var width = request.pointSize.width
         var height = request.pointSize.height
         if profile == .constrained {
@@ -196,7 +203,7 @@ actor ARDEngine {
         }
         var mode = VirtualDisplayMode.fitting(
             pointWidth: width, pointHeight: height, scale: request.scale,
-            refreshRate: Double(request.refreshRate), isHDR: request.wantsHDR
+            refreshRate: Double(request.refreshRate), isHDR: request.wantsHDR && allowsHDR
         )
         if profile == .constrained {
             // Clamping may have moved a side off the grid again.
@@ -613,7 +620,7 @@ actor ARDEngine {
     private func handle(_ reply: MediaReply) async throws {
         guard let core, var state = highPerformance else { return }
         switch reply {
-        case .ports(let audio, let video, let second):
+        case .ports(let audio, let video, let second, let hdr):
             var videoPorts = [video]
             if let second { videoPorts.append(second) }
             let all = [audio] + videoPorts
@@ -630,13 +637,14 @@ actor ARDEngine {
                 return
             }
             state.ports = MediaStreamReceiver.Ports(audio: audio, video: videoPorts)
+            state.hdrPorts = hdr
             state.portsAnnounced = true
             // Ports are named once a configuration has taken effect, including one that asked for the
             // displays already showing, which brings no new layout.
             state.changeOutstanding = false
             highPerformance = state
             core.shared.withLock { $0.awaitingNewLayout = false }
-            core.note("the Mac named its media ports: sound \(audio), pictures \(videoPorts)")
+            core.note("the Mac named its media ports: sound \(audio), pictures \(videoPorts)" + (hdr.contains(true) ? ", HDR \(hdr)" : ""))
             if try await !offerIfReady(), highPerformance?.reassertPending == true {
                 // No stream can start on these displays; ask for the session's own now.
                 highPerformance?.reassertPending = false
@@ -708,6 +716,10 @@ actor ARDEngine {
         for (index, screen) in screens.enumerated() {
             offer.videos[index].width = UInt16(clamping: screen.pixelWidth)
             offer.videos[index].height = UInt16(clamping: screen.pixelHeight)
+            // HDR pictures for a display asked for HDR, once the Mac has marked its port so.
+            let macMarkedHDR = index < state.hdrPorts.count && state.hdrPorts[index]
+            let askedForHDR = index < state.applied.count && state.applied[index].isHDR
+            offer.videos[index].offersHDR = macMarkedHDR && askedForHDR
         }
         let usedPorts = MediaStreamReceiver.Ports(audio: ports.audio, video: Array(ports.video.prefix(legs)))
         // Claimed before binding sockets suspends this actor, so that nothing else (a resize)
@@ -759,7 +771,7 @@ actor ARDEngine {
         #endif
         connection.send(offer.message())
         core.restartMediaWatch()
-        core.note("offered media for " + offer.videos.map { "\($0.width) × \($0.height)" }.joined(separator: " and "))
+        core.note("offered media for " + offer.videos.map { "\($0.width) × \($0.height)\($0.offersHDR ? " HDR" : "")" }.joined(separator: " and "))
         startTimer(for: .offer)
         return true
     }
@@ -796,7 +808,7 @@ actor ARDEngine {
         guard modes.count == state.offer.videos.count else { return }
         connection.send(ClientMessage.setDisplayConfiguration(modes, dynamic: true))
         if !isReassertion { core.restartMediaWatch() }
-        core.note((isReassertion ? "asked again for virtual displays: " : "asked for virtual displays: ") + modes.map { "\($0.pointWidth) × \($0.pointHeight) pt (\($0.pixelWidth) × \($0.pixelHeight) px)" }.joined(separator: " and "))
+        core.note((isReassertion ? "asked again for virtual displays: " : "asked for virtual displays: ") + modes.map { "\($0.pointWidth) × \($0.pointHeight) pt (\($0.pixelWidth) × \($0.pixelHeight) px\($0.isHDR ? ", HDR" : ""))" }.joined(separator: " and "))
         state.applied = state.desired
         state.changeOutstanding = true
         state.layoutSinceChange = false
@@ -899,7 +911,7 @@ actor ARDEngine {
             throw .tooManyDisplays(maximum: state.offer.videos.count)
         }
         state.requests = requests
-        state.desired = requests.map { Self.mode(for: $0, profile: state.offer.bandwidthProfile) }
+        state.desired = requests.map { Self.mode(for: $0, profile: state.offer.bandwidthProfile, allowsHDR: state.allowsHDR) }
         highPerformance = state
         if state.desired == state.applied, !state.changeOutstanding, !state.offerOutstanding { return }
         // Earlier requests are superseded: only the newest size is worth applying.
@@ -973,13 +985,33 @@ actor ARDEngine {
         reassertVirtualDisplays()
     }
 
+    /// Goes on with SDR displays for the rest of the session: this device cannot decode the Mac's
+    /// HDR pictures after all.
+    func giveUpHDR() {
+        guard var state = highPerformance, state.allowsHDR else { return }
+        core?.note("this device cannot decode the Mac's HDR pictures; going on in SDR")
+        core?.setHDRUnavailable(.notSupportedByDevice)
+        state.allowsHDR = false
+        state.desired = state.requests.map { Self.mode(for: $0, profile: state.offer.bandwidthProfile, allowsHDR: false) }
+        highPerformance = state
+        guard state.desired != state.applied else { return }
+        if state.sessionSizeApplied, !state.changeOutstanding, !state.offerOutstanding {
+            sendDisplayChange()
+        } else {
+            highPerformance?.reassertPending = true
+        }
+    }
+
     /// Goes on in the constrained media profile (0.33–6 Mbit/s instead of 20–60), with a fresh
     /// stream. Returns false when the stream is constrained already: then only Standard mode is left.
     func stepDown() -> Bool {
         guard var state = highPerformance, state.offer.bandwidthProfile == .full else { return false }
         core?.note("the path cannot carry the full rate; going on in the constrained media profile")
+        core?.setHDRUnavailable(.lowBandwidth)
         state.offer.bandwidthProfile = .constrained
-        state.desired = state.requests.map { Self.mode(for: $0, profile: .constrained) }
+        // HDR's ten bits are given up with the rate; a Mac does not lower them itself.
+        state.allowsHDR = false
+        state.desired = state.requests.map { Self.mode(for: $0, profile: .constrained, allowsHDR: false) }
         highPerformance = state
         if state.sessionSizeApplied, !state.changeOutstanding, !state.offerOutstanding {
             sendDisplayChange()

@@ -23,6 +23,8 @@ final class RenderCore {
         /// The Core Video wrapper that owns a zero-copy texture; `nil` for an uploaded one.
         var backing: WrappedSurface?
         var pixelSize: PixelSize
+        /// The pixels are PQ-encoded (HDR); otherwise sRGB-encoded.
+        var isPQ: Bool
     }
 
     /// A zero-copy texture's Core Video wrapper, together with the cache that made it.
@@ -47,11 +49,17 @@ final class RenderCore {
         }
     }
 
+    /// What SDR frames are drawn into, and what offscreen renders read back.
     static let pixelFormat = MTLPixelFormat.bgra8Unorm
+    /// What HDR frames are drawn into: PQ-encoded, passed through as they come.
+    static let hdrPixelFormat = MTLPixelFormat.bgr10a2Unorm
+    /// Where a Mac puts SDR white in its PQ pictures: its desktop's white measured at 100 nits
+    /// (macOS 27 and macOS 15). The pointer and the background are drawn at that level too.
+    static let referenceWhiteNits = 100.0
 
     let device: any MTLDevice
     private let commandQueue: any MTLCommandQueue
-    private var pipelines: Pipelines?
+    private var pipelines: [MTLPixelFormat: Pipelines] = [:]
     private var pipelinesFailed = false
     private var textureCache: CVMetalTextureCache?
     private var textureCacheFailed = false
@@ -72,14 +80,17 @@ final class RenderCore {
 
     /// Draws into the layer's next drawable and presents it.
     func render(_ inputs: RenderInputs, to layer: CAMetalLayer) {
-        guard let size = inputs.geometry.drawablePixelSize, let pipelines = loadPipelines() else { return }
+        guard let size = inputs.geometry.drawablePixelSize else { return }
         let drawableSize = CGSize(width: size.width, height: size.height)
         if layer.drawableSize != drawableSize {
             layer.drawableSize = drawableSize
         }
         // `nextDrawable` waits (up to a second) when every drawable is in flight; that is the
-        // back-pressure that keeps this queue from running ahead of the display.
+        // back-pressure that keeps this queue from running ahead of the display. The layer's pixel
+        // format changes on the main actor when frames turn HDR or back, so the drawable's own
+        // format decides the pipeline.
         guard let drawable = layer.nextDrawable(),
+              let pipelines = loadPipelines(for: drawable.texture.pixelFormat),
               let commandBuffer = commandQueue.makeCommandBuffer()
         else { return }
         encode(inputs, into: drawable.texture, pixelSize: size, commandBuffer: commandBuffer, pipelines: pipelines)
@@ -90,7 +101,7 @@ final class RenderCore {
     /// Draws the same composition into a texture and reads it back.
     func renderOffscreen(_ inputs: RenderInputs, pixelWidth: Int, pixelHeight: Int) -> CGImage? {
         guard pixelWidth > 0, pixelHeight > 0, pixelWidth <= 16_384, pixelHeight <= 16_384,
-              let pipelines = loadPipelines()
+              let pipelines = loadPipelines(for: Self.pixelFormat)
         else { return nil }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: Self.pixelFormat,
@@ -147,14 +158,16 @@ final class RenderCore {
         commandBuffer: any MTLCommandBuffer,
         pipelines: Pipelines
     ) {
+        let targetIsPQ = target.pixelFormat == Self.hdrPixelFormat
+        let background = targetIsPQ ? Self.pqEncoded(srgb: inputs.background) : inputs.background
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColor(
-            red: inputs.background.x,
-            green: inputs.background.y,
-            blue: inputs.background.z,
+            red: background.x,
+            green: background.y,
+            blue: background.z,
             alpha: 1
         )
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
@@ -172,6 +185,7 @@ final class RenderCore {
             && abs(devicePixelsPerRemotePixel - devicePixelsPerRemotePixel.rounded()) < 0.002
         var uniforms = QuadUniforms(rect: Self.normalised(geometry.contentFrame, in: geometry.viewSize))
         uniforms.options.x = devicePixelsPerRemotePixel < 0.999 ? 1 : 0
+        uniforms.setEncodings(imageIsPQ: frame.isPQ, targetIsPQ: targetIsPQ)
         encoder.setRenderPipelineState(pipelines.frame)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 0)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<QuadUniforms>.stride, index: 0)
@@ -186,11 +200,29 @@ final class RenderCore {
               let texture = cursorTexture(for: image)
         else { return }
         var cursorUniforms = QuadUniforms(rect: Self.normalised(rect, in: geometry.viewSize))
+        cursorUniforms.setEncodings(imageIsPQ: false, targetIsPQ: targetIsPQ)
         encoder.setRenderPipelineState(pipelines.cursor)
         encoder.setVertexBytes(&cursorUniforms, length: MemoryLayout<QuadUniforms>.stride, index: 0)
+        encoder.setFragmentBytes(&cursorUniforms, length: MemoryLayout<QuadUniforms>.stride, index: 0)
         encoder.setFragmentTexture(texture, index: 0)
         encoder.setFragmentSamplerState(pipelines.linear, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+    }
+
+    /// An sRGB colour as PQ code values, with SDR white at ``referenceWhiteNits``.
+    static func pqEncoded(srgb colour: SIMD3<Double>) -> SIMD3<Double> {
+        func linear(_ value: Double) -> Double {
+            let value = min(max(value, 0), 1)
+            return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        func pq(_ value: Double) -> Double {
+            let m1 = 2610.0 / 16384, m2 = 2523.0 / 4096 * 128
+            let c1 = 3424.0 / 4096, c2 = 2413.0 / 4096 * 32, c3 = 2392.0 / 4096 * 32
+            let power = pow(value, m1)
+            return pow((c1 + c2 * power) / (1 + c3 * power), m2)
+        }
+        let scale = referenceWhiteNits / 10_000
+        return SIMD3(pq(linear(colour.x) * scale), pq(linear(colour.y) * scale), pq(linear(colour.z) * scale))
     }
 
     /// Layer points (top-left origin) to normalised device coordinates: left, top, right, bottom.
@@ -238,12 +270,21 @@ final class RenderCore {
         return cache
     }
 
+    /// The texture format a surface's pixels read as: 8-bit BGRA, or 10-bit RGB packed in 32 bits.
+    private static func textureFormat(of buffer: CVPixelBuffer) -> MTLPixelFormat? {
+        switch CVPixelBufferGetPixelFormatType(buffer) {
+        case kCVPixelFormatType_32BGRA: .bgra8Unorm
+        case kCVPixelFormatType_ARGB2101010LEPacked: .bgr10a2Unorm
+        default: nil
+        }
+    }
+
     /// Zero-copy: the IOSurface behind the pixel buffer becomes the texture's storage.
     private func wrap(_ frame: DisplayFrame) -> FrameTexture? {
         guard let cache = loadTextureCache() else { return nil }
         var result: FrameTexture?
         frame.surface.withUnsafeBuffer { buffer in
-            guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA,
+            guard let format = Self.textureFormat(of: buffer),
                   CVPixelBufferGetIOSurface(buffer) != nil
             else { return }
             let width = CVPixelBufferGetWidth(buffer)
@@ -254,7 +295,7 @@ final class RenderCore {
                 cache,
                 buffer,
                 nil,
-                Self.pixelFormat,
+                format,
                 width,
                 height,
                 0,
@@ -264,7 +305,8 @@ final class RenderCore {
             result = FrameTexture(
                 texture: texture,
                 backing: WrappedSurface(backing, cache: cache),
-                pixelSize: Self.mappingSize(frame, width: width, height: height)
+                pixelSize: Self.mappingSize(frame, width: width, height: height),
+                isPQ: Imaging.isPQ(buffer)
             )
         }
         return result
@@ -274,7 +316,7 @@ final class RenderCore {
     private func upload(_ frame: DisplayFrame) -> FrameTexture? {
         var result: FrameTexture?
         frame.surface.withUnsafeBuffer { buffer in
-            guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA,
+            guard let format = Self.textureFormat(of: buffer),
                   CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess
             else { return }
             defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
@@ -283,9 +325,9 @@ final class RenderCore {
             guard width > 0, height > 0, let base = CVPixelBufferGetBaseAddress(buffer) else { return }
 
             var texture = uploadTexture
-            if texture?.width != width || texture?.height != height {
+            if texture?.width != width || texture?.height != height || texture?.pixelFormat != format {
                 let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: Self.pixelFormat,
+                    pixelFormat: format,
                     width: width,
                     height: height,
                     mipmapped: false
@@ -301,7 +343,7 @@ final class RenderCore {
                 withBytes: base,
                 bytesPerRow: CVPixelBufferGetBytesPerRow(buffer)
             )
-            result = FrameTexture(texture: texture, backing: nil, pixelSize: Self.mappingSize(frame, width: width, height: height))
+            result = FrameTexture(texture: texture, backing: nil, pixelSize: Self.mappingSize(frame, width: width, height: height), isPQ: Imaging.isPQ(buffer))
         }
         return result
     }
@@ -344,9 +386,10 @@ final class RenderCore {
 
     // MARK: Pipelines
 
-    private func loadPipelines() -> Pipelines? {
-        if let pipelines { return pipelines }
-        if pipelinesFailed { return nil }
+    /// The pipelines that draw into targets of `format`, one of ``pixelFormat`` and ``hdrPixelFormat``.
+    private func loadPipelines(for format: MTLPixelFormat) -> Pipelines? {
+        if let made = pipelines[format] { return made }
+        if pipelinesFailed || (format != Self.pixelFormat && format != Self.hdrPixelFormat) { return nil }
         do {
             let library = try device.makeLibrary(source: Shaders.source, options: nil)
             guard let vertex = library.makeFunction(name: Shaders.vertexFunction),
@@ -361,14 +404,14 @@ final class RenderCore {
             frameDescriptor.label = "Marionette frame"
             frameDescriptor.vertexFunction = vertex
             frameDescriptor.fragmentFunction = frameFragment
-            frameDescriptor.colorAttachments[0].pixelFormat = Self.pixelFormat
+            frameDescriptor.colorAttachments[0].pixelFormat = format
 
             let cursorDescriptor = MTLRenderPipelineDescriptor()
             cursorDescriptor.label = "Marionette cursor"
             cursorDescriptor.vertexFunction = vertex
             cursorDescriptor.fragmentFunction = cursorFragment
             let attachment = cursorDescriptor.colorAttachments[0]!
-            attachment.pixelFormat = Self.pixelFormat
+            attachment.pixelFormat = format
             attachment.isBlendingEnabled = true
             attachment.rgbBlendOperation = .add
             attachment.alphaBlendOperation = .add
@@ -400,7 +443,7 @@ final class RenderCore {
                 nearest: nearest,
                 linear: linear
             )
-            pipelines = made
+            pipelines[format] = made
             return made
         } catch {
             pipelinesFailed = true

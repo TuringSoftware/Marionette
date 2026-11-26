@@ -193,6 +193,28 @@ private func request(
     }
 }
 
+/// A frame's pixels as 32-bit words, row by row without padding.
+private func pixels(of frame: DisplayFrame) -> [UInt32] {
+    frame.surface.withUnsafeBuffer { buffer in
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return [] }
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        return (0..<frame.pixelSize.height).flatMap { row in
+            UnsafeBufferPointer(start: (base + row * stride).assumingMemoryBound(to: UInt32.self), count: frame.pixelSize.width)
+        }
+    }
+}
+
+/// An sRGB-encoded 8-bit value as a 10-bit PQ code value, with white at 100 nits (SMPTE ST 2084).
+private func pq10(_ value: UInt8) -> UInt32 {
+    let encoded = Double(value) / 255
+    let linear = encoded <= 0.04045 ? encoded / 12.92 : pow((encoded + 0.055) / 1.055, 2.4)
+    let luminance = pow(linear * 100 / 10_000, 2610.0 / 16384)
+    let signal = pow((3424.0 / 4096 + 2413.0 / 128 * luminance) / (1 + 2392.0 / 128 * luminance), 2523.0 / 32)
+    return UInt32((signal * 1023).rounded())
+}
+
 @Suite struct SimulatedSessionBehaviourTests {
     private func connect(_ scenario: SimulationScenario = fastScenario(), options: SessionOptions = SessionOptions()) async throws -> SimulatedSession {
         try await SimulatedBackend(scenario: scenario).connectSimulated(request(options))
@@ -436,6 +458,39 @@ private func request(
         #expect(second.sequence > first.sequence)
         #expect(second.damage.bounds.area < display.pixelSize.width * display.pixelSize.height / 4)
         await session.disconnect()
+    }
+
+    @Test func anHDRDisplayShowsItsSDRPictureInPQBeforeAndAfterASmallChange() async throws {
+        // No frames but the ones asked for: both sessions then draw the same pictures.
+        var scenario = fastScenario()
+        scenario.frameRate = 0
+        func connectShowing(hdr: Bool) async throws -> (SimulatedSession, FrameMailbox) {
+            let displays = [VirtualDisplayRequest(pointSize: PixelSize(width: 800, height: 600), scale: 1, wantsHDR: hdr)]
+            let session = try await connect(scenario, options: SessionOptions(displays: .virtual(displays)))
+            return (session, session.frames(for: try #require(session.layout.displays.first?.id)))
+        }
+        let (sdrSession, sdrFrames) = try await connectShowing(hdr: false)
+        let (hdrSession, hdrFrames) = try await connectShowing(hdr: true)
+        #expect(hdrSession.layout.displays.first?.isHDR == true)
+
+        func expectSamePicture() async throws {
+            let sdr = try #require(await sdrFrames.next())
+            let hdr = try #require(await hdrFrames.next())
+            #expect(hdr.surface.withUnsafeBuffer { CVPixelBufferGetPixelFormatType($0) } == kCVPixelFormatType_ARGB2101010LEPacked)
+            let expected = pixels(of: sdr).map { pixel in
+                3 << 30 | pq10(UInt8(pixel >> 16 & 0xff)) << 20 | pq10(UInt8(pixel >> 8 & 0xff)) << 10 | pq10(UInt8(pixel & 0xff))
+            }
+            #expect(pixels(of: hdr) == expected)
+        }
+        try await expectSamePicture()
+
+        for session in [sdrSession, hdrSession] {
+            session.input.send(.text("only the panel changes"))
+            await session.waitForInputToBeRendered()
+        }
+        try await expectSamePicture()
+        await sdrSession.disconnect()
+        await hdrSession.disconnect()
     }
 
     @Test func droppingTheSessionEndsIt() async throws {

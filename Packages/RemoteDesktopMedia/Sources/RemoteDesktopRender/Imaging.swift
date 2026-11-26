@@ -27,6 +27,74 @@ enum Imaging {
         surface.withUnsafeBuffer { colorSpace(of: $0) }
     }
 
+    /// Whether a surface's pixels are PQ-encoded: an HDR picture from a Mac.
+    static func isPQ(_ buffer: CVPixelBuffer) -> Bool {
+        if let transfer = CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nil) as? String {
+            return transfer == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String
+        }
+        guard let space = colorSpace(of: buffer) else { return false }
+        return CGColorSpaceIsPQBased(space)
+    }
+
+    static func isPQ(_ surface: CVReadOnlyPixelBuffer) -> Bool {
+        surface.withUnsafeBuffer { isPQ($0) }
+    }
+
+    /// 10-bit code values to 8-bit sRGB-encoded ones: PQ with SDR white at the renderer's reference
+    /// white and everything brighter clipped, as the renderer draws HDR pictures into an SDR target.
+    private static let pqToSDR: [UInt8] = (0..<1024).map { code in
+        let m1 = 2610.0 / 16384, m2 = 2523.0 / 4096 * 128
+        let c1 = 3424.0 / 4096, c2 = 2413.0 / 4096 * 32, c3 = 2392.0 / 4096 * 32
+        let power = pow(Double(code) / 1023, 1 / m2)
+        let nits = 10_000 * pow(max(power - c1, 0) / (c2 - c3 * power), 1 / m1)
+        let linear = min(nits / RenderCore.referenceWhiteNits, 1)
+        let encoded = linear <= 0.0031308 ? linear * 12.92 : 1.055 * pow(linear, 1 / 2.4) - 0.055
+        return UInt8((encoded * 255).rounded())
+    }
+
+    /// The sRGB-encoded colour space with a 10-bit surface's primaries.
+    private static func sdrSpace(primariesOf buffer: CVPixelBuffer) -> CGColorSpace? {
+        let primaries = CVBufferCopyAttachment(buffer, kCVImageBufferColorPrimariesKey, nil) as? String
+        if primaries == kCVImageBufferColorPrimaries_P3_D65 as String {
+            return CGColorSpace(name: CGColorSpace.displayP3)
+        }
+        if primaries == kCVImageBufferColorPrimaries_ITU_R_2020 as String {
+            return CGColorSpace(name: CGColorSpace.itur_2020_sRGBGamma)
+        }
+        return CGColorSpace(name: CGColorSpace.sRGB)
+    }
+
+    /// An 8-bit copy of a 10-bit RGB surface (``isPQ(_:)`` or not), in the surface's primaries with
+    /// the sRGB transfer function: what the renderer would show on an SDR screen.
+    private static func sdrCopy(of buffer: CVPixelBuffer) -> (pixels: Data, space: CGColorSpace)? {
+        guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_ARGB2101010LEPacked,
+              let space = sdrSpace(primariesOf: buffer),
+              CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess
+        else { return nil }
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        guard width > 0, height > 0, let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let table = isPQ(buffer) ? pqToSDR : (0..<1024).map { UInt8($0 >> 2) }
+        var pixels = Data(count: width * height * 4)
+        pixels.withUnsafeMutableBytes { destination in
+            let out = destination.bindMemory(to: UInt8.self)
+            for y in 0..<height {
+                let row = base.advanced(by: y * stride).assumingMemoryBound(to: UInt32.self)
+                for x in 0..<width {
+                    let word = UInt32(littleEndian: row[x])
+                    let index = (y * width + x) * 4
+                    out[index] = table[Int(word & 0x3ff)]
+                    out[index + 1] = table[Int(word >> 10 & 0x3ff)]
+                    out[index + 2] = table[Int(word >> 20 & 0x3ff)]
+                    out[index + 3] = 255
+                }
+            }
+        }
+        return (pixels, space)
+    }
+
     private static let opaqueBGRA = CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
     private static let premultipliedBGRA = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
 
@@ -51,14 +119,26 @@ enum Imaging {
         )
     }
 
-    /// Reads a BGRA surface back into an image the caller owns, optionally scaled down so that
-    /// neither side exceeds `maximumPixelDimension`. The image is opaque (a surface's alpha byte is
-    /// undefined) and tagged with the surface's own colour space.
+    /// Reads a surface back into an image the caller owns, optionally scaled down so that neither
+    /// side exceeds `maximumPixelDimension`. The image is opaque (a surface's alpha byte is
+    /// undefined). A BGRA surface keeps its own colour space; a 10-bit one becomes the SDR picture
+    /// the renderer would show of it.
     static func image(from surface: CVReadOnlyPixelBuffer, maximumPixelDimension: Int?) -> CGImage? {
         surface.withUnsafeBuffer { buffer -> CGImage? in
-            guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA,
-                  CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess
-            else { return nil }
+            guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA else {
+                let width = CVPixelBufferGetWidth(buffer)
+                let height = CVPixelBufferGetHeight(buffer)
+                guard let (pixels, space) = sdrCopy(of: buffer),
+                      let provider = CGDataProvider(data: pixels as CFData),
+                      let source = CGImage(
+                          width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                          space: space, bitmapInfo: CGBitmapInfo(rawValue: opaqueBGRA), provider: provider,
+                          decode: nil, shouldInterpolate: true, intent: .defaultIntent
+                      )
+                else { return nil }
+                return scaledCopy(of: source, space: space, maximumPixelDimension: maximumPixelDimension)
+            }
+            guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return nil }
             defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
 
             let width = CVPixelBufferGetWidth(buffer)
@@ -88,29 +168,36 @@ enum Imaging {
                       intent: .defaultIntent
                   )
             else { return nil }
-
-            var targetWidth = width
-            var targetHeight = height
-            if let limit = maximumPixelDimension, limit > 0, max(width, height) > limit {
-                let factor = Double(limit) / Double(max(width, height))
-                targetWidth = max(1, Int((Double(width) * factor).rounded()))
-                targetHeight = max(1, Int((Double(height) * factor).rounded()))
-            }
-            guard let context = CGContext(
-                data: nil,
-                width: targetWidth,
-                height: targetHeight,
-                bitsPerComponent: 8,
-                bytesPerRow: targetWidth * 4,
-                space: space,
-                bitmapInfo: opaqueBGRA
-            ) else { return nil }
-            let isScaled = targetWidth != width || targetHeight != height
-            context.interpolationQuality = isScaled ? .high : .none
-            context.setBlendMode(.copy)
-            context.draw(source, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
-            return context.makeImage()
+            return scaledCopy(of: source, space: space, maximumPixelDimension: maximumPixelDimension)
         }
+    }
+
+    /// An opaque copy of `source` the caller owns, scaled down so that neither side exceeds
+    /// `maximumPixelDimension`.
+    private static func scaledCopy(of source: CGImage, space: CGColorSpace, maximumPixelDimension: Int?) -> CGImage? {
+        let width = source.width
+        let height = source.height
+        var targetWidth = width
+        var targetHeight = height
+        if let limit = maximumPixelDimension, limit > 0, max(width, height) > limit {
+            let factor = Double(limit) / Double(max(width, height))
+            targetWidth = max(1, Int((Double(width) * factor).rounded()))
+            targetHeight = max(1, Int((Double(height) * factor).rounded()))
+        }
+        guard let context = CGContext(
+            data: nil,
+            width: targetWidth,
+            height: targetHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: targetWidth * 4,
+            space: space,
+            bitmapInfo: opaqueBGRA
+        ) else { return nil }
+        let isScaled = targetWidth != width || targetHeight != height
+        context.interpolationQuality = isScaled ? .high : .none
+        context.setBlendMode(.copy)
+        context.draw(source, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
+        return context.makeImage()
     }
 
     /// Identity reserved for the built-in pointer so it shares the cursor texture cache.

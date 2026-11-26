@@ -141,6 +141,18 @@ private let sampleOffer = MediaOffer(
         #expect(fields.first { $0.field == 13 }?.value == 17_169_649_764_516_085_760)
     }
 
+    @Test func videoBlobOffersHDRModesOnlyWhenAsked() throws {
+        func hdrModes(_ offer: MediaOffer, leg: Int = 0) throws -> UInt64? {
+            let blob = try open(try dissect(offer.message()).videos[leg].offer).blob
+            let stream = protobufFields(try #require(protobufFields(blob).first { $0.field == 5 }?.bytes))
+            return stream.first { $0.field == 9 }?.value
+        }
+        #expect(try hdrModes(sampleOffer) == 1)
+        var offer = sampleOffer
+        offer.videos[0].offersHDR = true
+        #expect(try hdrModes(offer) == 9)
+    }
+
     @Test func h264AloneAndTwoDisplays() throws {
         var offer = sampleOffer
         offer.videos[0].codec = .h264
@@ -167,12 +179,22 @@ private let sampleOffer = MediaOffer(
         // Type 1, version, flags; audio 5900 on; video 5901 on; second video off; ten reserved bytes.
         let body = Data(hex: "0001 0001 00000000  170c 00000001  170d 00000001  170e 00000000  00000000000000000000")
         #expect(body.count == 36)
-        #expect(try MediaReply.parse(body) == .ports(audio: 5900, video: 5901, secondVideo: nil))
+        #expect(try MediaReply.parse(body) == .ports(audio: 5900, video: 5901, secondVideo: nil, hdr: [false]))
         let two = Data(hex: "0001 0001 00000000  170c 00000001  170d 00000001  170e 00000001  00000000000000000000")
-        #expect(try MediaReply.parse(two) == .ports(audio: 5900, video: 5901, secondVideo: 5902))
+        #expect(try MediaReply.parse(two) == .ports(audio: 5900, video: 5901, secondVideo: 5902, hdr: [false, false]))
         let disabled = Data(hex: "0001 0001 00000000  170c 00000001  170d 00000000  170e 00000000  00000000000000000000")
         // A port without its in-use bit is still named; whether it can be used is the session's call.
-        #expect(try MediaReply.parse(disabled) == .ports(audio: 5900, video: 5901, secondVideo: nil))
+        #expect(try MediaReply.parse(disabled) == .ports(audio: 5900, video: 5901, secondVideo: nil, hdr: [false]))
+    }
+
+    @Test func portsMessageMarksHDRDisplays() throws {
+        let first = Data(hex: "0001 0001 00000000  170c 00000001  170d 00000003  170e 00000001  00000000000000000000")
+        #expect(try MediaReply.parse(first) == .ports(audio: 5900, video: 5901, secondVideo: 5902, hdr: [true, false]))
+        let second = Data(hex: "0001 0001 00000000  170c 00000001  170d 00000001  170e 00000003  00000000000000000000")
+        #expect(try MediaReply.parse(second) == .ports(audio: 5900, video: 5901, secondVideo: 5902, hdr: [false, true]))
+        // The audio port's bit 1 says nothing about pictures.
+        let audio = Data(hex: "0001 0001 00000000  170c 00000003  170d 00000001  170e 00000000  00000000000000000000")
+        #expect(try MediaReply.parse(audio) == .ports(audio: 5900, video: 5901, secondVideo: nil, hdr: [false]))
     }
 
     @Test func answerLengthsMustDescribeTheBody() throws {

@@ -34,6 +34,8 @@ public final class DisplayRenderer: Sendable {
         var contentsScale = 0.0
         /// The colour space the layer is tagged with; `nil` until the first frame says.
         var layerColorSpace: CGColorSpace?
+        /// The frames are HDR (PQ-encoded), and the layer is set up to show them so.
+        var showsHDR = false
         var texturePath: TexturePath?
         var frameTask: Task<Void, Never>?
         var cursorTask: Task<Void, Never>?
@@ -249,34 +251,66 @@ public final class DisplayRenderer: Sendable {
 
     /// Shows a frame directly, bypassing ``start(frames:cursor:)``.
     public func submit(_ frame: DisplayFrame) {
-        // Standard-mode frames are sRGB, High Performance frames Display P3; the surface says which.
+        // Standard-mode frames are sRGB, High Performance frames Display P3, and HDR ones Display
+        // P3 with PQ; the surface says which.
         let space = Imaging.colorSpace(of: frame.surface)
-        let (waiters, newSpace): ([CheckedContinuation<Void, Never>], CGColorSpace?) = state.withLock { state in
+        let isHDR = Imaging.isPQ(frame.surface)
+        let (waiters, newSpace, newHDR): ([CheckedContinuation<Void, Never>], CGColorSpace?, Bool?) = state.withLock { state in
             state.inputs.frame = frame
             state.inputs.frameSerial &+= 1
-            var changed: CGColorSpace?
+            var changedSpace: CGColorSpace?
             if let space, state.layerColorSpace != space {
                 state.layerColorSpace = space
-                changed = space
+                changedSpace = space
+            }
+            var changedHDR: Bool?
+            if state.showsHDR != isHDR {
+                state.showsHDR = isHDR
+                changedHDR = isHDR
             }
             defer { state.firstFrameWaiters.removeAll() }
-            return (Array(state.firstFrameWaiters.values), changed)
+            return (Array(state.firstFrameWaiters.values), changedSpace, changedHDR)
         }
-        if let newSpace {
+        if newSpace != nil || newHDR != nil {
             let box = layerBox
+            let apply: @MainActor () -> Void = {
+                if let newHDR { Self.configure(box.layer, forHDR: newHDR) }
+                if let newSpace { box.layer.colorspace = newSpace }
+            }
             if Thread.isMainThread {
-                MainActor.assumeIsolated { box.layer.colorspace = newSpace }
+                MainActor.assumeIsolated(apply)
             } else {
-                Task { @MainActor in box.layer.colorspace = newSpace }
+                Task { @MainActor in apply() }
             }
         }
         for waiter in waiters { waiter.resume() }
         setNeedsRender()
     }
 
+    /// How bright the brightest part of a Mac's HDR picture is taken to be, for tone mapping onto a
+    /// screen with less headroom. A Mac's pictures carry no mastering metadata of their own.
+    static let assumedPeakNits: Float = 1000
+
+    /// Sets a layer up for PQ-encoded HDR frames, passed through as they come, or for SDR ones.
+    /// Core Animation then tone-maps the HDR frames to whatever headroom the screen has: none on an
+    /// SDR monitor, more as the brightness goes down.
+    @MainActor
+    static func configure(_ layer: CAMetalLayer, forHDR isHDR: Bool) {
+        layer.pixelFormat = isHDR ? RenderCore.hdrPixelFormat : RenderCore.pixelFormat
+        layer.wantsExtendedDynamicRangeContent = isHDR
+        layer.edrMetadata = isHDR
+            ? CAEDRMetadata.hdr10(minLuminance: 0.0005, maxLuminance: assumedPeakNits, opticalOutputScale: Float(RenderCore.referenceWhiteNits))
+            : nil
+    }
+
     /// The colour space of the frames being shown, once one has arrived.
     public var frameColorSpace: CGColorSpace? {
         state.withLock { $0.layerColorSpace }
+    }
+
+    /// Whether the frames being shown are HDR, and drawn so.
+    public var showsHDR: Bool {
+        state.withLock { $0.showsHDR }
     }
 
     /// Updates the pointer directly, bypassing ``start(frames:cursor:)``.
@@ -334,6 +368,12 @@ public final class DisplayRenderer: Sendable {
     public func snapshot(maximumPixelDimension: Int? = nil) -> CGImage? {
         guard let frame = state.withLock({ $0.inputs.frame }) else { return nil }
         return Imaging.image(from: frame.surface, maximumPixelDimension: maximumPixelDimension)
+    }
+
+    /// A frame as an image, like ``snapshot(maximumPixelDimension:)``: an HDR frame becomes the SDR
+    /// picture an SDR screen would show.
+    public static func image(of frame: DisplayFrame, maximumPixelDimension: Int? = nil) -> CGImage? {
+        Imaging.image(from: frame.surface, maximumPixelDimension: maximumPixelDimension)
     }
 
     /// Draws exactly what would be presented — background, display at the current geometry, pointer

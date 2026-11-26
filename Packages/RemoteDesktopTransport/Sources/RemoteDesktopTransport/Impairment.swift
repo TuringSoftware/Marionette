@@ -515,6 +515,8 @@ public final class ImpairedByteStream: ByteStream {
     private static let segment = 1448
 
     private let base: any ByteStream
+
+    public var isMetered: Bool? { base.isMetered }
     private let control: ImpairmentControl
     private let ledger: ImpairmentLedger
     private let state: Mutex<State>

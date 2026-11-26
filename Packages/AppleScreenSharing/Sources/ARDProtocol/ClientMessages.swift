@@ -587,13 +587,14 @@ public struct VirtualDisplayMode: Sendable, Hashable {
         )
     }
 
-    /// The four fixed modes Apple's viewer lists after the requested one.
-    private static func presets(refreshRate: Double) -> [VirtualDisplayMode] {
+    /// The four fixed modes Apple's viewer lists after the requested one. It marks every mode of an
+    /// HDR display as HDR, these included.
+    private static func presets(refreshRate: Double, isHDR: Bool) -> [VirtualDisplayMode] {
         [
-            VirtualDisplayMode(pixelWidth: 2880, pixelHeight: 1800, pointWidth: 1440, pointHeight: 900, refreshRate: refreshRate),
-            VirtualDisplayMode(pixelWidth: 3840, pixelHeight: 2160, pointWidth: 1920, pointHeight: 1080, refreshRate: refreshRate),
-            VirtualDisplayMode(pixelWidth: 2880, pixelHeight: 1620, pointWidth: 1440, pointHeight: 810, refreshRate: refreshRate),
-            VirtualDisplayMode(pixelWidth: 2624, pixelHeight: 1696, pointWidth: 1312, pointHeight: 848, refreshRate: refreshRate),
+            VirtualDisplayMode(pixelWidth: 2880, pixelHeight: 1800, pointWidth: 1440, pointHeight: 900, refreshRate: refreshRate, isHDR: isHDR),
+            VirtualDisplayMode(pixelWidth: 3840, pixelHeight: 2160, pointWidth: 1920, pointHeight: 1080, refreshRate: refreshRate, isHDR: isHDR),
+            VirtualDisplayMode(pixelWidth: 2880, pixelHeight: 1620, pointWidth: 1440, pointHeight: 810, refreshRate: refreshRate, isHDR: isHDR),
+            VirtualDisplayMode(pixelWidth: 2624, pixelHeight: 1696, pointWidth: 1312, pointHeight: 848, refreshRate: refreshRate, isHDR: isHDR),
         ]
     }
 
@@ -604,7 +605,7 @@ public struct VirtualDisplayMode: Sendable, Hashable {
     /// One display descriptor: a 0x9c-byte head, then 0x1c bytes per mode. It leads with its own
     /// length, which is how the Mac steps from one descriptor to the next.
     static func descriptor(for mode: VirtualDisplayMode, index: Int, dynamic: Bool) -> Data {
-        let modes = [mode] + presets(refreshRate: mode.refreshRate)
+        let modes = [mode] + presets(refreshRate: mode.refreshRate, isHDR: mode.isHDR)
         let headLength = 0x9c
         let modeLength = 0x1c
         let total = headLength + modes.count * modeLength

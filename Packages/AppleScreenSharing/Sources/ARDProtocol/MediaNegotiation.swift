@@ -166,14 +166,18 @@ public struct MediaOffer: Sendable {
         public var codec: MediaVideoCodec
         /// Pictures per frame: 1 for the whole display in one picture, 4 for Apple's four strips.
         public var tilesPerFrame: Int
+        /// Offer HDR pictures as well as SDR ones. Apple's viewer does so for a leg whose port the
+        /// Mac marked HDR (``MediaReply/ports(audio:video:secondVideo:hdr:)``).
+        public var offersHDR: Bool
 
-        public init(ssrc: UInt32, keys: MediaLegKeys, width: UInt16, height: UInt16, codec: MediaVideoCodec, tilesPerFrame: Int) {
+        public init(ssrc: UInt32, keys: MediaLegKeys, width: UInt16, height: UInt16, codec: MediaVideoCodec, tilesPerFrame: Int, offersHDR: Bool = false) {
             self.ssrc = ssrc
             self.keys = keys
             self.width = width
             self.height = height
             self.codec = codec
             self.tilesPerFrame = tilesPerFrame
+            self.offersHDR = offersHDR
         }
     }
 
@@ -316,7 +320,9 @@ public struct MediaOffer: Sendable {
             stream.uint(6, UInt64(video.tilesPerFrame))
             stream.uint(7, 1)
             stream.uint(8, 63)
-            stream.uint(9, 1)
+            // The HDR modes the viewer takes, a bit for each: mode 0 is SDR; Apple's viewer adds
+            // mode 3 for an HDR display.
+            stream.uint(9, video.offersHDR ? 0b1001 : 0b1)
             stream.uint(12, 1)
         }
         // The same entries with the 40 Mbit/s one moved to the front, as Apple's viewer orders them.
@@ -372,8 +378,9 @@ public struct MediaOffer: Sendable {
 /// What a Mac says about the media stream, carried in rectangles of the media-stream encoding.
 public enum MediaReply: Sendable, Equatable {
     /// The Mac is ready for an offer. Media will come from these ports on the Mac to the same port
-    /// numbers on the viewer.
-    case ports(audio: UInt16, video: UInt16, secondVideo: UInt16?)
+    /// numbers on the viewer. `hdr` has an entry for each picture port, in order: whether the Mac
+    /// marked it HDR.
+    case ports(audio: UInt16, video: UInt16, secondVideo: UInt16?, hdr: [Bool])
     /// The Mac accepted the offer; the stream starts.
     case answer(videoLegs: Int)
     /// The Mac could not start the stream.
@@ -390,14 +397,18 @@ public enum MediaReply: Sendable, Equatable {
             guard reader.remaining >= 28 else { throw .malformed("media-stream port message of \(body.count) bytes") }
             // Bit 0 of each port's flags word marks it as in use. Every Mac seen sets it for sound and
             // the first picture; what clearing it would mean is unknown, so those two ports are taken
-            // as named and the session's own checks decide whether they can be used.
+            // as named and the session's own checks decide whether they can be used. Bit 1 of a
+            // picture port's word marks its display HDR: Apple's viewer then offers HDR pictures.
             let audioPort = try reader.u16()
             try reader.skip(4)
             let videoPort = try reader.u16()
-            try reader.skip(4)
+            let videoFlags = try reader.u32()
             let secondPort = try reader.u16()
             let secondFlags = try reader.u32()
-            return .ports(audio: audioPort, video: videoPort, secondVideo: secondFlags & 1 != 0 ? secondPort : nil)
+            let hasSecond = secondFlags & 1 != 0
+            var hdr = [videoFlags & 2 != 0]
+            if hasSecond { hdr.append(secondFlags & 2 != 0) }
+            return .ports(audio: audioPort, video: videoPort, secondVideo: hasSecond ? secondPort : nil, hdr: hdr)
         case 2:
             guard reader.remaining >= 10 else { throw .malformed("media-stream answer of \(body.count) bytes") }
             let audio = Int(try reader.u16())

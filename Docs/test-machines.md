@@ -22,7 +22,7 @@ Mac:
 
 - two physical displays, and virtual displays larger than a VM accepts;
 - the Mac's own pointer position on a Mac with a GPU (see the protocol reference's open questions);
-- HDR, and sound quality under load;
+- sound quality under load;
 - anything that depends on sleep and wake.
 
 ### A second account, for session select

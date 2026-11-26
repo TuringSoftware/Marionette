@@ -242,6 +242,9 @@ final class ScriptedMac: Sendable {
         /// Port messages repeated after the first, as a Mac does while it waits.
         var repeatedPortMessages = 0
         var namesOneVideoPort = false
+        /// Makes the HDR displays a configuration asks for, and marks their ports HDR, as macOS 15
+        /// and 27 do. Otherwise every display is SDR, whatever was asked for.
+        var makesHDRDisplays = true
         /// The ports named: sound, then the two picture legs.
         var ports: [UInt16] = [5900, 5901, 5902]
         /// Display configurations, counted from 0 (the opening one), that the Mac never answers.
@@ -1230,16 +1233,21 @@ extension ScriptedMac {
 
     /// Names the media ports, as the Mac does once a configuration has taken effect.
     func sendPorts() {
-        let legs = max(1, media.withLock { $0.screens.count })
+        let screens = media.withLock { $0.screens }
+        let legs = max(1, screens.count)
+        // Bit 1 marks a picture port's display HDR.
+        func hdrBit(_ leg: Int) -> UInt32 {
+            options.highPerformance.makesHDRDisplays && leg < screens.count && screens[leg].isHDR ? 2 : 0
+        }
         var body = WireWriter()
         body.u16(1)
         body.zeros(6)
         body.u16(options.highPerformance.ports[0])
         body.u32(1)
         body.u16(videoPorts[0])
-        body.u32(1)
+        body.u32(1 | hdrBit(0))
         body.u16(videoPorts[1])
-        body.u32(legs > 1 && !options.highPerformance.namesOneVideoPort ? 1 : 0)
+        body.u32(legs > 1 && !options.highPerformance.namesOneVideoPort ? 1 | hdrBit(1) : 0)
         body.zeros(10)
         send(Self.mediaReply(body.data))
     }

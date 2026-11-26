@@ -73,6 +73,7 @@ extension UnavailableReason {
         case .notSupportedByDevice: String(localized: "This device doesn’t support it.", bundle: #bundle)
         case .unreliableNetwork: String(localized: "The network is losing too much data for it.", bundle: #bundle)
         case .mediaBlocked: String(localized: "The video never arrived. A firewall, router or VPN between the two computers may be blocking it.", bundle: #bundle)
+        case .lowBandwidth: String(localized: "The connection is metered or too slow for it.", bundle: #bundle)
         case .notConfigured(let detail): detail
         case .remoteScreenLocked: String(localized: "The remote computer’s screen is locked.", bundle: #bundle)
         }

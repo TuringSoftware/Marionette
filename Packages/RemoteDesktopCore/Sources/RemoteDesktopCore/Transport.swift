@@ -38,6 +38,13 @@ public protocol ByteStream: Sendable {
     func write(_ data: Data) async throws
     /// Closes both directions. Pending and later reads end; idempotent.
     func close() async
+    /// Whether the network this stream runs over is metered (cellular, a personal hotspot); `nil`
+    /// when the stream cannot tell.
+    var isMetered: Bool? { get }
+}
+
+extension ByteStream {
+    public var isMetered: Bool? { nil }
 }
 
 /// One received datagram and when it arrived. Rate control needs the arrival time measured as close

@@ -100,10 +100,15 @@ struct SimulatedDesktopLayout {
 final class SimulatedCanvas {
     let pixelSize: PixelSize
     let scale: CGFloat
+    /// Snapshots are 10-bit PQ, with the desktop's white at 100 nits as a Mac puts it.
+    let isHDR: Bool
     private let context: CGContext
+    /// The bitmap in 10-bit PQ, for an HDR display. Converted only where the bitmap changes:
+    /// converting a whole display for every snapshot takes longer than a frame lasts.
+    private let encoded: UnsafeMutableBufferPointer<UInt32>?
     private var drawn: SimulatedDesktopContent?
 
-    init?(pixelSize: PixelSize, scale: Double) {
+    init?(pixelSize: PixelSize, scale: Double, isHDR: Bool = false) {
         guard !pixelSize.isEmpty,
               let space = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(
@@ -118,9 +123,15 @@ final class SimulatedCanvas {
         else { return nil }
         self.pixelSize = pixelSize
         self.scale = CGFloat(scale)
+        self.isHDR = isHDR
         self.context = context
+        encoded = isHDR ? .allocate(capacity: pixelSize.width * pixelSize.height) : nil
         context.translateBy(x: 0, y: CGFloat(pixelSize.height))
         context.scaleBy(x: 1, y: -1)
+    }
+
+    deinit {
+        encoded?.deallocate()
     }
 
     // MARK: Layout
@@ -136,6 +147,12 @@ final class SimulatedCanvas {
 
     /// Brings the bitmap up to date with `content` and returns what changed.
     func update(to content: SimulatedDesktopContent) -> DamageRegion {
+        let damage = draw(content)
+        for rectangle in damage.rectangles { encode(rectangle) }
+        return damage
+    }
+
+    private func draw(_ content: SimulatedDesktopContent) -> DamageRegion {
         defer { drawn = content }
         guard let previous = drawn else {
             drawEverything(content)
@@ -174,8 +191,73 @@ final class SimulatedCanvas {
         return damage
     }
 
-    /// Copies the bitmap into a new immutable pixel buffer.
+    /// sRGB-encoded 8-bit values to 10-bit PQ code values, with white at 100 nits.
+    private static let sRGBToPQ: [UInt32] = (0..<256).map { value in
+        let encoded = Double(value) / 255
+        let linear = encoded <= 0.04045 ? encoded / 12.92 : pow((encoded + 0.055) / 1.055, 2.4)
+        let m1 = 2610.0 / 16384, m2 = 2523.0 / 4096 * 128
+        let c1 = 3424.0 / 4096, c2 = 2413.0 / 4096 * 32, c3 = 2392.0 / 4096 * 32
+        let power = pow(linear * 100 / 10_000, m1)
+        return UInt32((pow((c1 + c2 * power) / (1 + c3 * power), m2) * 1023).rounded())
+    }
+
+    /// Converts one part of the bitmap for an HDR display's snapshots.
+    private func encode(_ rectangle: PixelRect) {
+        let rectangle = rectangle.intersection(PixelRect(size: pixelSize))
+        guard !rectangle.isEmpty, let output = encoded?.baseAddress, let source = context.data else { return }
+        let sourceStride = context.bytesPerRow
+        Self.sRGBToPQ.withUnsafeBufferPointer { table in
+            for row in rectangle.y..<rectangle.maxY {
+                let input = (source + row * sourceStride + rectangle.x * 4).assumingMemoryBound(to: UInt8.self)
+                let line = output + row * pixelSize.width + rectangle.x
+                for column in 0..<rectangle.width {
+                    // BGRA in, opaque; alpha is premultiplied but the desktop is opaque throughout.
+                    let blue = table[Int(input[column * 4])]
+                    let green = table[Int(input[column * 4 + 1])]
+                    let red = table[Int(input[column * 4 + 2])]
+                    line[column] = (3 << 30 | red << 20 | green << 10 | blue).littleEndian
+                }
+            }
+        }
+    }
+
+    /// Copies the bitmap into a new immutable pixel buffer: 32-bit BGRA tagged sRGB, or for an HDR
+    /// display 10-bit RGB tagged BT.709 primaries and PQ.
     func snapshot() -> CVReadOnlyPixelBuffer? {
+        isHDR ? hdrSnapshot() : sdrSnapshot()
+    }
+
+    private func hdrSnapshot() -> CVReadOnlyPixelBuffer? {
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
+        ]
+        var created: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault, pixelSize.width, pixelSize.height, kCVPixelFormatType_ARGB2101010LEPacked,
+            attributes as CFDictionary, &created
+        )
+        guard status == kCVReturnSuccess, let buffer = created, let source = UnsafeRawPointer(encoded?.baseAddress) else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let destination = CVPixelBufferGetBaseAddress(buffer) {
+            let sourceStride = pixelSize.width * 4
+            let destinationStride = CVPixelBufferGetBytesPerRow(buffer)
+            if sourceStride == destinationStride {
+                memcpy(destination, source, sourceStride * pixelSize.height)
+            } else {
+                for row in 0..<pixelSize.height {
+                    memcpy(destination + row * destinationStride, source + row * sourceStride, sourceStride)
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+        return .adopting(buffer)
+    }
+
+    private func sdrSnapshot() -> CVReadOnlyPixelBuffer? {
         let attributes: [CFString: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferMetalCompatibilityKey: true,

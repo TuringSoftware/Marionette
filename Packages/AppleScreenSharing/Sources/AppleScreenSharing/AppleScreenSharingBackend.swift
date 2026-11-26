@@ -38,6 +38,19 @@ public struct AppleScreenSharingBackend: RemoteDesktopBackend {
 
     public var videoCodec: VideoCodecPreference = .automatic
 
+    /// Whether High Performance may give displays asked for HDR (``VirtualDisplayRequest/wantsHDR``)
+    /// 10-bit HDR pictures.
+    public enum DynamicRangePreference: Sendable, Hashable {
+        /// Where this device decodes HEVC 10-bit 4:4:4 in hardware.
+        case automatic
+        /// Never: every display is SDR.
+        case standard
+        /// Always, whatever the device's decoder says. For tools.
+        case high
+    }
+
+    public var dynamicRange: DynamicRangePreference = .automatic
+
     /// The time limits sessions run by; tests shorten them.
     var sessionTiming = SessionTiming()
 
@@ -118,6 +131,7 @@ public struct AppleScreenSharingBackend: RemoteDesktopBackend {
                 await stream.close()
                 throw .cancelled
             }
+            let streamIsMetered = stream.isMetered
 
             if attempt == 1 { request.progress(.negotiating) }
             var configuration = ARDConnection.Configuration()
@@ -201,7 +215,17 @@ public struct AppleScreenSharingBackend: RemoteDesktopBackend {
             request.progress(.preparingDisplays)
             var timing = sessionTiming
             // A cellular or metered path rarely carries the full 20–60 Mbit/s: start lighter there.
-            if mode == .highPerformance, timing.bandwidthProfile == .full, await Self.pathIsMetered() {
+            // The network the session itself runs over decides; the device's default route only
+            // when the stream cannot tell.
+            var isMetered = false
+            if mode == .highPerformance, timing.bandwidthProfile == .full {
+                if let streamIsMetered {
+                    isMetered = streamIsMetered
+                } else {
+                    isMetered = await Self.pathIsMetered()
+                }
+            }
+            if isMetered {
                 diagnostics?("on a cellular or metered network: starting in the constrained media profile")
                 timing.bandwidthProfile = .constrained
             }
@@ -212,6 +236,7 @@ public struct AppleScreenSharingBackend: RemoteDesktopBackend {
                 isEncrypted: established.isEncrypted,
                 serverAuthenticated: established.usedSecurityType == .srp,
                 videoCodec: mode == .highPerformance ? resolvedVideoCodec : .hevc,
+                allowsHDR: mode == .highPerformance && allowsHDR,
                 // wayshare reads Meta, a Mac's Option, as Command, and its own Option from Alt.
                 keyStyle: ARDConnection.isMac(offering: established.offeredSecurityTypes) ? .mac : .standard,
                 inputKey: established.inputKey, timing: timing, diagnostics: diagnostics
@@ -378,6 +403,15 @@ public struct AppleScreenSharingBackend: RemoteDesktopBackend {
         case .hevc: .hevc
         case .h264: .h264
         case .automatic: DecoderCapabilities.decodesHEVC444InHardware ? .hevc : .h264
+        }
+    }
+
+    /// Whether this device takes HDR pictures, with the automatic choice worked out on it.
+    var allowsHDR: Bool {
+        switch dynamicRange {
+        case .standard: false
+        case .high: true
+        case .automatic: DecoderCapabilities.decodesHEVC444TenBitInHardware
         }
     }
 
@@ -551,12 +585,12 @@ public final class ARDSession: RemoteSession {
     init(
         connection: ARDConnection, transport: any TransportProvider, serverInit: ServerInit, mode: SessionMode, options: SessionOptions,
         security: String, isEncrypted: Bool = true, serverAuthenticated: Bool = false, videoCodec: MediaVideoCodec = .hevc,
-        keyStyle: X11Keysym.ModifierStyle = .mac, inputKey: Data? = nil, timing: SessionTiming = SessionTiming(),
+        allowsHDR: Bool = false, keyStyle: X11Keysym.ModifierStyle = .mac, inputKey: Data? = nil, timing: SessionTiming = SessionTiming(),
         diagnostics: (@Sendable (String) -> Void)? = nil
     ) {
         core = ARDSessionCore(
             connection: connection, transport: transport, serverInit: serverInit, mode: mode, options: options, security: security,
-            isEncrypted: isEncrypted, serverAuthenticated: serverAuthenticated, videoCodec: videoCodec, keyStyle: keyStyle,
+            isEncrypted: isEncrypted, serverAuthenticated: serverAuthenticated, videoCodec: videoCodec, allowsHDR: allowsHDR, keyStyle: keyStyle,
             inputKey: inputKey, timing: timing, diagnostics: diagnostics
         )
         engine = ARDEngine(core: core)
@@ -583,6 +617,7 @@ public final class ARDSession: RemoteSession {
                     guard let core, !core.shared.withLock({ $0.state.isDisconnected }) else { return }
                     core.checkControlHealth()
                     if core.info.mode == .highPerformance {
+                        if core.takeHDRRefusal() { await engine.giveUpHDR() }
                         if core.checkMediaHealth() { await engine.restartStream() }
                         if core.isLosingTooMuch(), await !engine.stepDown() {
                             core.note("the path loses too much even for the constrained media profile")
@@ -665,11 +700,20 @@ public final class ARDSession: RemoteSession {
         if isHighPerformance {
             capabilities.audio = .available(ARDAudio(core: core))
             capabilities.statistics = .available(ARDStatistics(core: core))
+            // A Mac makes HDR pictures only in the full media profile.
+            if !core.allowsHDR {
+                capabilities.highDynamicRange = .unavailable(.notSupportedByDevice)
+            } else if core.timing.bandwidthProfile == .constrained {
+                capabilities.highDynamicRange = .unavailable(.lowBandwidth)
+            } else {
+                capabilities.highDynamicRange = .available(())
+            }
             // High Performance has no quality choice: the Mac's rate control is automatic.
             capabilities.quality = .unavailable(.requiresMode(.standard))
         } else {
             capabilities.audio = .unavailable(core.info.isTunnelled ? .tunnelled : .requiresMode(.highPerformance))
             capabilities.statistics = .unavailable(.requiresMode(.highPerformance))
+            capabilities.highDynamicRange = .unavailable(.requiresMode(.highPerformance))
             capabilities.quality = .available(ARDQuality(engine: engine))
         }
         capabilities.fileTransfer = mayControl ? .available(core.fileTransfers) : .unavailable(.notPermitted)
@@ -844,7 +888,10 @@ final class ARDStatistics: SessionStatisticsSource {
                         packetLoss: loss,
                         roundTripTime: nil,
                         decodeLatency: nil,
-                        videoCodec: current.first?.codec.map { $0 == .hevc ? "HEVC 4:4:4" : "H.264" }
+                        videoCodec: current.first?.codec.map { codec in
+                            guard codec == .hevc else { return "H.264" }
+                            return core.shared.withLock { $0.layout.displays.contains(where: \.isHDR) } ? "HEVC 4:4:4 10-bit HDR" : "HEVC 4:4:4"
+                        }
                     ))
                     previous = current
                 }

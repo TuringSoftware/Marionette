@@ -28,6 +28,13 @@ public final class TCPByteStream: ByteStream {
     /// Screen Sharing is never silent that long: the Mac's status heartbeat comes every 2.1 s.
     static let keepalive = (idle: 30, interval: 10, count: 6)
 
+    /// Whether the interface this connection uses is metered. Not the device's default route: a
+    /// phone on Wi-Fi to a Mac can have cellular as its default route all the same (a network
+    /// without internet access), while this connection runs over Wi-Fi.
+    public var isMetered: Bool? {
+        connection.currentPath.map { $0.isExpensive || $0.usesInterfaceType(.cellular) }
+    }
+
     private init(connection: NWConnection, queue: DispatchQueue, connectedPeer: Endpoint?, usesProxy: Bool) {
         self.connection = connection
         self.queue = queue

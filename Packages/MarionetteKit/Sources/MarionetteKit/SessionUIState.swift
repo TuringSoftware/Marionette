@@ -142,6 +142,8 @@ public struct SessionPreferences: Sendable, Hashable {
     /// Scale to Fit or Actual Size; a free zoom is not kept (it belongs to one desktop's size).
     public var zoomMode: ViewportModel.ZoomMode = .fit
     public var isAudioMuted = false
+    /// High Performance displays are HDR where the screen showing them can show it.
+    public var isHDREnabled = true
     /// Content follows the fingers (the default on Apple devices) rather than the scroll bar.
     public var naturalScrolling = true
     /// Multiplier for relative pointer movement in trackpad mode, 0.5 (slow) to 2 (fast).
@@ -166,6 +168,7 @@ public struct SessionPreferences: Sendable, Hashable {
     private static let accessoryPageKey = "session.accessoryPage"
     private static let zoomModeKey = "session.zoomMode"
     private static let audioMutedKey = "session.audioMuted"
+    private static let hdrKey = "session.hdr"
     private static let secondaryDisplayEdgeKey = "input.secondaryDisplayEdge"
 
     public init(defaults: UserDefaults) {
@@ -188,6 +191,7 @@ public struct SessionPreferences: Sendable, Hashable {
         default: zoomMode = .fit
         }
         isAudioMuted = defaults.bool(forKey: Self.audioMutedKey)
+        if defaults.object(forKey: Self.hdrKey) != nil { isHDREnabled = defaults.bool(forKey: Self.hdrKey) }
         if let raw = defaults.string(forKey: Self.secondaryDisplayEdgeKey), let edge = DisplayEdge(rawValue: raw) { secondaryDisplayEdge = edge }
     }
 
@@ -207,6 +211,7 @@ public struct SessionPreferences: Sendable, Hashable {
         }
         defaults.set(zoom, forKey: Self.zoomModeKey)
         defaults.set(isAudioMuted, forKey: Self.audioMutedKey)
+        defaults.set(isHDREnabled, forKey: Self.hdrKey)
         defaults.set(secondaryDisplayEdge.rawValue, forKey: Self.secondaryDisplayEdgeKey)
     }
 

@@ -127,6 +127,7 @@
     "The computer stopped responding while signing in." : {},
     "The computer stopped responding while starting video." : {},
     "The computer stopped responding while waiting for permission." : {},
+    "The connection is metered or too slow for it." : {},
     "The connection to the remote computer closed." : {},
     "The connection to the remote computer was lost." : {},
     "The connection was stopped because the identity of “%@” wasn’t trusted." : {},

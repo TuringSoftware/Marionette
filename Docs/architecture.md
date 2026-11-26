@@ -43,6 +43,12 @@ Each layer depends only on the ones below it.
   Enclave key signs through libssh2's signing callback, so its private half is never in memory.
 - **Front ends read capabilities, not back-end identity.** A control exists because the session
   offers the capability, and shows the reason when it does not.
+- **A frame's surface says what it is.** Frames are 8-bit BGRA, or 10-bit RGB (`l10r`) for an HDR
+  display, tagged with their colour space; the renderer sets its layer up from each frame, passing
+  PQ through to an EDR layer that Core Animation tone-maps to the screen. The front end only asks
+  for HDR (`VirtualDisplayRequest.wantsHDR`, `SessionOptions.wantsHDR`) while High Dynamic Range is
+  on and the screen showing a display can show it; the back end grants it where the device decodes
+  it and the Mac makes it.
 - **The simulated back end ships in the app.** It powers the demo computer, the UI tests and the
   screenshots through named scenarios (`ScenarioCatalog`).
 - **C libraries keep to one thread each.** libssh2 runs non-blocking on a serial queue; LibVNCClient

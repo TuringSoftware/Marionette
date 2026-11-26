@@ -50,6 +50,7 @@ struct RemoteDisplayStage: View {
                 scale: displayScale
             )
             ZStack {
+                ScreenHDRReader { session.windowScreenChanged(showsHDR: $0 || launchOptions.isHDRScreenOverride) }
                 if session.externalDisplayMode == .externalOnly {
                     ExternalOnlyTrackpad(session: session)
                 } else {

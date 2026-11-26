@@ -32,7 +32,12 @@ func runSession(_ arguments: Arguments) async throws {
     guard sizeParts.count == 2 else { throw Failure("--size must look like 1440x900") }
     let scale = Int(arguments.option("scale") ?? "2") ?? 2
     let displayCount = Int(arguments.option("displays") ?? "1") ?? 1
-    options.displays = .virtual(Array(repeating: VirtualDisplayRequest(pointSize: PixelSize(width: sizeParts[0], height: sizeParts[1]), scale: scale), count: displayCount))
+    // This tool has no screen of its own: unless told otherwise it asks for HDR displays, as the app
+    // does on an HDR screen, and the back end decides whether the device takes them.
+    let hdr = arguments.option("hdr") ?? "auto"
+    guard ["auto", "on", "off"].contains(hdr) else { throw Failure("unknown --hdr \(hdr); use auto, on or off") }
+    let wantsHDR = hdr != "off"
+    options.displays = .virtual(Array(repeating: VirtualDisplayRequest(pointSize: PixelSize(width: sizeParts[0], height: sizeParts[1]), scale: scale, wantsHDR: wantsHDR), count: displayCount))
     if let physical = arguments.option("physical") {
         if physical == "all" {
             options.displays = .physical(.all)
@@ -42,6 +47,8 @@ func runSession(_ arguments: Arguments) async throws {
             throw Failure("--physical is all or a display id, not \(physical)")
         }
     }
+    // High Performance shows the Mac's own screens on virtual displays like them, HDR or not.
+    options.wantsHDR = wantsHDR
 
     let started = ContinuousClock.now
     @Sendable func log(_ message: String) {
@@ -102,6 +109,11 @@ func runSession(_ arguments: Arguments) async throws {
         case "h264": backend.videoCodec = .h264
         default: backend.videoCodec = .automatic
         }
+        switch hdr {
+        case "on": backend.dynamicRange = .high
+        case "off": backend.dynamicRange = .standard
+        default: backend.dynamicRange = .automatic
+        }
         // For measuring how much input a Mac loses around a display change.
         if arguments.flags.contains("no-input-hold") { backend.holdsInputAroundDisplayChanges = false }
         // For comparing what a Mac does with plain key and pointer events.
@@ -153,10 +165,21 @@ func runSession(_ arguments: Arguments) async throws {
     func watch(_ display: DisplayID) {
         let mailbox = session.frames(for: display)
         tasks.append(Task {
+            var shownFormat: String?
             for await frame in mailbox {
                 counts.withLock { state in
                     state.frames[display, default: 0] += 1
                     state.last[display] = frame
+                }
+                // Each change of the pictures' format: 8-bit or 10-bit, and their transfer.
+                let format = frame.surface.withUnsafeBuffer { buffer in
+                    let type = CVPixelBufferGetPixelFormatType(buffer)
+                    let transfer = CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nil) as? String
+                    return "\(type == kCVPixelFormatType_32BGRA ? "8-bit BGRA" : type == kCVPixelFormatType_ARGB2101010LEPacked ? "10-bit RGB" : "format \(type)"), \(transfer ?? "untagged")"
+                }
+                if format != shownFormat {
+                    shownFormat = format
+                    log("display \(display): pictures in \(format)")
                 }
             }
         })
@@ -288,7 +311,7 @@ func runSession(_ arguments: Arguments) async throws {
             log("typed “\(text)”")
         }
         if let script = arguments.option("script") {
-            try await runInputScript(script, on: session, log: log) { name in
+            try await runInputScript(script, on: session, wantsHDR: wantsHDR, log: log) { name in
                 // `snap:NAME`: the picture as it is now, beside --output.
                 let output = arguments.option("output") ?? "snap"
                 for display in session.layout.displays {
@@ -300,7 +323,7 @@ func runSession(_ arguments: Arguments) async throws {
                     timer.cancel()
                     guard let frame else { continue }
                     let path = "\(output)-\(name)-\(display.id.rawValue).png"
-                    try? writePNG(pixels: packedPixels(frame), size: frame.pixelSize, to: URL(fileURLWithPath: path))
+                    try? writePNG(frame: frame, to: URL(fileURLWithPath: path))
                     let surface = frame.surface.withUnsafeBuffer { (CVPixelBufferGetWidth($0), CVPixelBufferGetHeight($0)) }
                     log("snapshot \(path): declared \(frame.pixelSize.width) × \(frame.pixelSize.height), surface \(surface.0) × \(surface.1)")
                 }
@@ -313,7 +336,7 @@ func runSession(_ arguments: Arguments) async throws {
             try await Task.sleep(for: .seconds(1))
             log("resizing to \(parts[0]) × \(parts[1]) pt")
             let before = ContinuousClock.now
-            try await configuration.setVirtualDisplays(Array(repeating: VirtualDisplayRequest(pointSize: PixelSize(width: parts[0], height: parts[1]), scale: scale), count: displayCount))
+            try await configuration.setVirtualDisplays(Array(repeating: VirtualDisplayRequest(pointSize: PixelSize(width: parts[0], height: parts[1]), scale: scale, wantsHDR: wantsHDR), count: displayCount))
             log("resize agreed after \(ContinuousClock.now - before)")
             for display in session.layout.displays where counts.withLock({ $0.frames[display.id] == nil }) { watch(display.id) }
         }
@@ -331,9 +354,8 @@ func runSession(_ arguments: Arguments) async throws {
         let frames = result.frames[display.id] ?? 0
         print("\(display.id): \(frames) frames (\(String(format: "%.1f", Double(frames) / seconds))/s), \(display.pixelSize.width) × \(display.pixelSize.height), \(display.state)")
         if let output = arguments.option("output"), let frame = result.last[display.id] {
-            let pixels = packedPixels(frame)
             let path = "\(output)-\(display.id.rawValue).png"
-            try writePNG(pixels: pixels, size: frame.pixelSize, to: URL(fileURLWithPath: path))
+            try writePNG(frame: frame, to: URL(fileURLWithPath: path))
             print("  wrote \(path)")
         }
     }
@@ -341,20 +363,6 @@ func runSession(_ arguments: Arguments) async throws {
     print("audio: \(result.audioChunks) chunks (\(String(format: "%.2f", Double(result.audioChunks) / 100)) s), \(result.audibleChunks) audible, peak \(String(format: "%.3f", result.audioPeak))")
     print("final state: \(session.state)")
     guard layout.displays.allSatisfy({ (result.frames[$0.id] ?? 0) > 0 }) else { throw Failure("a display produced no frames") }
-}
-
-/// A frame's pixels, rows packed without padding.
-func packedPixels(_ frame: DisplayFrame) -> Data {
-    frame.surface.withUnsafeBuffer { buffer in
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        let stride = CVPixelBufferGetBytesPerRow(buffer)
-        var packed = Data(capacity: frame.pixelSize.width * frame.pixelSize.height * 4)
-        for row in 0..<frame.pixelSize.height {
-            packed.append(Data(bytes: CVPixelBufferGetBaseAddress(buffer)! + row * stride, count: frame.pixelSize.width * 4))
-        }
-        return packed
-    }
 }
 
 /// Plays a small input script: steps separated by `;`.
@@ -367,7 +375,8 @@ func packedPixels(_ frame: DisplayFrame) -> Data {
 ///     click:400,300        primary click at a position in the first display's pixels
 ///     touch:400,300+500,300   the fingers now on the first display's touch screen, in its pixels, each
 ///                          in the place of the one listed there before; touch: lifts them all
-///     resize:1280x800@2    start resizing the virtual displays (points, scale) and go on meanwhile
+///     resize:1280x800@2    start resizing the virtual displays (points, scale) and go on meanwhile;
+///                          `+hdr` or `+sdr` after it asks for HDR displays or SDR ones
 ///     move:400,300         move the pointer there
 ///     magnify:0.8          pinch, as the app sends it (also rotate:90, smartzoom:, lookup:, swipe:left,
 ///                          scroll:0/-600 for a two-finger scroll with phases and momentum)
@@ -387,7 +396,7 @@ func packedPixels(_ frame: DisplayFrame) -> Data {
 ///     fetch:/remote>local  put:local>remote/folder   a file transfer through the session
 ///     curtain:on/NOTE      curtain mode on with a note, through the session's capability (curtain:off lowers it)
 ///     raw-curtain:on/NOTE  the same message whether or not the Mac offers curtain mode (protocol experiment)
-func runInputScript(_ script: String, on session: any RemoteSession, log: @escaping @Sendable (String) -> Void, snapshot: (String) async -> Void = { _ in }) async throws {
+func runInputScript(_ script: String, on session: any RemoteSession, wantsHDR wantsHDRByDefault: Bool = false, log: @escaping @Sendable (String) -> Void, snapshot: (String) async -> Void = { _ in }) async throws {
     let keys: [String: KeyCode] = [
         "space": .space, "return": .returnOrEnter, "escape": .escape, "tab": .tab, "delete": .deleteBackward,
         "left": .leftArrow, "right": .rightArrow, "up": .upArrow, "down": .downArrow,
@@ -445,11 +454,18 @@ func runInputScript(_ script: String, on session: any RemoteSession, log: @escap
                 session.input.send(.key(KeyEvent(key: modifier.key, modifiers: modifiers, phase: .up)))
             }
         case "resize":
-            // resize:WxH[@S][*N]: N displays of that size (default: as many as there are now).
-            let halves = argument.split(separator: "*", maxSplits: 1)
+            // resize:WxH[@S][*N][+hdr|+sdr]: N displays of that size (default: as many as there are
+            // now), asked for HDR or not (default: as `--hdr` says).
+            var sizeText = Substring(argument)
+            var wantsHDR = wantsHDRByDefault
+            if sizeText.hasSuffix("+hdr") || sizeText.hasSuffix("+sdr") {
+                wantsHDR = sizeText.hasSuffix("+hdr")
+                sizeText = sizeText.dropLast(4)
+            }
+            let halves = sizeText.split(separator: "*", maxSplits: 1)
             let parts = halves[0].split(whereSeparator: { "x@".contains($0) }).compactMap { Int($0) }
             guard parts.count >= 2, let configuration = session.capabilities.displayConfiguration.value else { throw Failure("bad resize in “\(step)”") }
-            let request = VirtualDisplayRequest(pointSize: PixelSize(width: parts[0], height: parts[1]), scale: parts.count > 2 ? parts[2] : 2)
+            let request = VirtualDisplayRequest(pointSize: PixelSize(width: parts[0], height: parts[1]), scale: parts.count > 2 ? parts[2] : 2, wantsHDR: wantsHDR)
             let count = halves.count > 1 ? (Int(halves[1]) ?? 1) : session.layout.displays.count
             Task {
                 do {

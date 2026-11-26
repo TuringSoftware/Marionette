@@ -11,11 +11,14 @@ public struct SimulationScenario: Sendable {
         public var name: String
         public var pixelSize: PixelSize
         public var scale: Double
+        /// Its pictures are 10-bit HDR (PQ), as a Mac sends for an HDR virtual display.
+        public var isHDR: Bool
 
-        public init(name: String, pixelSize: PixelSize, scale: Double = 2) {
+        public init(name: String, pixelSize: PixelSize, scale: Double = 2, isHDR: Bool = false) {
             self.name = name
             self.pixelSize = pixelSize
             self.scale = scale
+            self.isHDR = isHDR
         }
     }
 
@@ -87,6 +90,9 @@ public struct SimulationScenario: Sendable {
     /// Reject virtual display requests smaller than this, as real servers do.
     public var minimumVirtualPointSize = PixelSize(width: 800, height: 600)
     public var maximumVirtualDisplays = 2
+    /// Virtual displays asked for in HDR (``VirtualDisplayRequest/wantsHDR``) get HDR pictures, as
+    /// from a Mac and a device that both take them.
+    public var makesHDRDisplays = true
     /// Text placed on the remote clipboard shortly after connecting, if any.
     public var initialRemoteClipboard: String?
     public var files: [RemoteFile] = [

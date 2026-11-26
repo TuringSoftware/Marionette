@@ -153,6 +153,9 @@ public struct SessionOptions: Sendable, Hashable {
     /// sent, with no unencrypted fallback. Set for a computer whose sessions were encrypted before,
     /// so nothing on the network can downgrade a saved connection.
     public var requiresEncryption: Bool
+    /// Whether virtual displays the back end makes by itself (High Performance showing the Mac's
+    /// own screens) are asked for in HDR, like ``VirtualDisplayRequest/wantsHDR`` for requested ones.
+    public var wantsHDR: Bool
 
     public init(
         mode: ModePreference = .automatic,
@@ -163,8 +166,10 @@ public struct SessionOptions: Sendable, Hashable {
         wantsClipboard: Bool = true,
         clientName: String = "Marionette",
         requiresServerAuthentication: Bool = false,
-        requiresEncryption: Bool = false
+        requiresEncryption: Bool = false,
+        wantsHDR: Bool = false
     ) {
+        self.wantsHDR = wantsHDR
         self.mode = mode
         self.displays = displays
         self.quality = quality

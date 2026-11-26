@@ -245,6 +245,13 @@ struct ControlStrip: View {
                 .pickerStyle(.menu)
                 .accessibilityIdentifier("quality-menu")
             }
+            if session.offersHDR {
+                // Screen Sharing's symbol for the same setting. Off and disabled where HDR cannot
+                // happen; the choice itself is kept for when it can.
+                Toggle("High Dynamic Range", systemImage: "square.stack.3d.up", isOn: Binding(get: { session.isHDREnabled && session.isHDRAvailable }, set: { session.setHDREnabled($0) }))
+                    .disabled(!session.isHDRAvailable)
+                    .accessibilityIdentifier("high-dynamic-range")
+            }
             if !session.features.remoteActions.isEmpty || session.features.curtain != .unavailable(.notSupportedByBackend) {
                 Section("On the Computer") {
                     ForEach(session.features.remoteActions, id: \.self) { action in

@@ -531,6 +531,12 @@ final class ScreenshotTests: XCTestCase {
             app.buttons["more-menu"].waitToExist().tap()
             app.buttons["open-files"].waitToExist()
         }
+        // High Dynamic Range is available only on a screen that shows HDR.
+        capture("44b-session-more-menu-hdr-screen", autoConnect: true, extra: ["-MarionetteHDRScreen"]) { app in
+            waitForSession(app)
+            app.buttons["more-menu"].waitToExist().tap()
+            app.descendants(matching: .any)["high-dynamic-range"].waitToExist()
+        }
         capture("45-session-view-menu-two-displays", scenario: "two-displays", autoConnect: true) { app in
             waitForSession(app)
             app.openViewMenu()

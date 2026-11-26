@@ -9,6 +9,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import RemoteDesktopCore
+import RemoteDesktopRender
 import RemoteDesktopTransport
 import UniformTypeIdentifiers
 
@@ -81,11 +82,13 @@ options:
   --scale N          1 or 2 (hp; default 2)
   --seconds N        how long to stream once pictures arrive (hp; default 5)
   --tiles N          pictures per frame to ask for (hp; default 1)
+  --offer-hdr        offer HDR pictures whatever the Mac says (hp)
   --with-cursor      have the Mac draw the pointer into the video (hp)
   --decode           decode picture and sound with the system codecs, and save the last picture (hp)
   --backend B        apple (Screen Sharing's own protocol) or vnc (plain VNC) (session; default apple)
   --mode M           auto, hp or standard (session; default auto)
   --codec C          auto, hevc or h264: the picture codec High Performance asks for (session; default auto)
+  --hdr H            auto, on or off: HDR displays where this Mac decodes 10-bit pictures, always, or never (session; default auto; hp: on or off, default off)
   --quality Q        adaptive or full, for Standard mode (session; default adaptive)
   --displays N       number of virtual displays (session; default 1)
   --physical WHICH   Standard mode on the Mac's own displays: all, or a display id (session)
@@ -171,8 +174,19 @@ func writePNG(pixels: Data, size: PixelSize, to url: URL) throws {
               space: CGColorSpace(name: CGColorSpace.sRGB)!,
               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
-          ),
-          let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)
+          )
+    else { throw Failure("could not create the image") }
+    try writePNG(image: image, to: url)
+}
+
+/// A frame as a PNG: an HDR frame as the SDR picture an SDR screen would show.
+func writePNG(frame: DisplayFrame, to url: URL) throws {
+    guard let image = DisplayRenderer.image(of: frame) else { throw Failure("could not read the frame") }
+    try writePNG(image: image, to: url)
+}
+
+func writePNG(image: CGImage, to url: URL) throws {
+    guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)
     else { throw Failure("could not create the image") }
     CGImageDestinationAddImage(destination, image, nil)
     guard CGImageDestinationFinalize(destination) else { throw Failure("could not write \(url.path)") }

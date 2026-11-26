@@ -156,6 +156,156 @@ import Testing
         model.disconnect()
     }
 
+    // MARK: HDR
+
+    /// A display is HDR when the screen that shows it can show HDR; the session's window moving to
+    /// such a screen, or off it, asks again.
+    @Test func theDisplayFollowsTheWindowsScreen() async throws {
+        var fixture = try Fixture()
+        fixture.computer.display = .fitToDevice
+        let model = fixture.makeModel()
+        model.stageLayoutChanged(size: CGSize(width: 1032, height: 1376), safeArea: .zero, deviceScale: 2)
+        model.windowScreenChanged(showsHDR: true)
+        model.start()
+        try await waitUntil { model.phase == .connected }
+        #expect(model.selectedDisplay?.isHDR == true, "asked for in HDR from the start")
+        #expect(model.isShowingHDR)
+
+        model.windowScreenChanged(showsHDR: false)
+        try await waitUntil(timeout: .seconds(10)) { model.selectedDisplay?.isHDR == false }
+        #expect(!model.isShowingHDR)
+        model.windowScreenChanged(showsHDR: true)
+        try await waitUntil(timeout: .seconds(10)) { model.selectedDisplay?.isHDR == true }
+        model.disconnect()
+    }
+
+    /// With two displays, each follows its own screen: the first the window's, the secondary the
+    /// monitor's while there is one.
+    @Test func eachDisplayFollowsItsOwnScreen() async throws {
+        var fixture = try Fixture()
+        fixture.computer.display = .fitToDevice
+        fixture.computer.hasSecondaryDisplay = true
+        let model = fixture.makeModel()
+        model.stageLayoutChanged(size: CGSize(width: 1032, height: 1376), safeArea: .zero, deviceScale: 2)
+        model.windowScreenChanged(showsHDR: true)
+        model.start()
+        try await waitUntil { model.phase == .connected }
+        #expect(model.layout.displays.map(\.isHDR) == [true, true], "without a monitor both are the window's")
+
+        model.externalScreenChanged(ExternalScreen(size: monitor.size, scale: monitor.scale, showsHDR: false), preferredMode: .mirror)
+        try await waitUntil(timeout: .seconds(10)) { model.layout.displays.map(\.isHDR) == [true, false] }
+
+        // The same monitor, now in HDR (its own setting changed).
+        model.externalScreenChanged(ExternalScreen(size: monitor.size, scale: monitor.scale, showsHDR: true))
+        try await waitUntil(timeout: .seconds(10)) { model.layout.displays.map(\.isHDR) == [true, true] }
+
+        model.externalScreenDisconnected()
+        model.windowScreenChanged(showsHDR: false)
+        try await waitUntil(timeout: .seconds(10)) { model.layout.displays.map(\.isHDR) == [false, false] }
+        model.disconnect()
+    }
+
+    /// The window's screen is often reported only once the connection is under way; the displays
+    /// asked for at the start are then asked for again, in HDR, as soon as the session is up.
+    @Test(arguments: [false, true])
+    func anHDRScreenReportedWhileConnectingStillGetsHDR(secondaryDisplay: Bool) async throws {
+        var fixture = try Fixture()
+        fixture.computer.display = .fitToDevice
+        fixture.computer.hasSecondaryDisplay = secondaryDisplay
+        let model = fixture.makeModel()
+        model.stageLayoutChanged(size: CGSize(width: 1032, height: 1376), safeArea: .zero, deviceScale: 2)
+        model.start()
+        try await waitUntil { model.connectionProgress >= 1 }
+        model.windowScreenChanged(showsHDR: true)
+        try await waitUntil { model.phase == .connected }
+        try await waitUntil(timeout: .seconds(10)) { !model.layout.displays.isEmpty && model.layout.displays.allSatisfy(\.isHDR) }
+        #expect(model.layout.displays.count == (secondaryDisplay ? 2 : 1))
+        model.disconnect()
+    }
+
+    /// High Dynamic Range can be turned off, which makes the displays SDR at once, and stays off for
+    /// the next session.
+    @Test func highDynamicRangeCanBeTurnedOffAndStaysOff() async throws {
+        var fixture = try Fixture()
+        fixture.computer.display = .fitToDevice
+        let model = fixture.makeModel()
+        #expect(model.isHDREnabled, "on by default")
+        model.stageLayoutChanged(size: CGSize(width: 1032, height: 1376), safeArea: .zero, deviceScale: 2)
+        model.windowScreenChanged(showsHDR: true)
+        model.start()
+        try await waitUntil { model.phase == .connected }
+        #expect(model.offersHDR)
+        #expect(model.selectedDisplay?.isHDR == true)
+
+        model.setHDREnabled(false)
+        try await waitUntil(timeout: .seconds(10)) { model.selectedDisplay?.isHDR == false }
+        model.disconnect()
+        #expect(SessionPreferences(defaults: fixture.defaults).isHDREnabled == false)
+
+        let next = fixture.makeModel()
+        #expect(!next.isHDREnabled)
+        next.stageLayoutChanged(size: CGSize(width: 1032, height: 1376), safeArea: .zero, deviceScale: 2)
+        next.windowScreenChanged(showsHDR: true)
+        next.start()
+        try await waitUntil { next.phase == .connected }
+        #expect(next.selectedDisplay?.isHDR == false)
+        next.setHDREnabled(true)
+        try await waitUntil(timeout: .seconds(10)) { next.selectedDisplay?.isHDR == true }
+        next.disconnect()
+    }
+
+    /// Without a screen that can show HDR the option can do nothing: the menus show it off and
+    /// disabled. Only the screens a display is shown on count: in External Only the device's own
+    /// screen shows none, however capable.
+    @Test func highDynamicRangeNeedsAScreenThatShowsIt() async throws {
+        let fixture = try Fixture()
+        let model = try await fixture.connectedModel()
+        #expect(model.isHDREnabled)
+        #expect(!model.canShowHDR)
+        model.externalScreenChanged(ExternalScreen(size: monitor.size, scale: monitor.scale, showsHDR: true), preferredMode: .externalOnly)
+        #expect(model.canShowHDR)
+        model.externalScreenDisconnected()
+        #expect(!model.canShowHDR)
+        model.windowScreenChanged(showsHDR: true)
+        #expect(model.canShowHDR)
+        // An AirPlay display without HDR takes the picture away from the HDR screen.
+        model.externalScreenChanged(monitor, preferredMode: .externalOnly)
+        #expect(model.externalDisplayMode == .externalOnly)
+        #expect(!model.canShowHDR)
+        model.disconnect()
+    }
+
+    /// A session that cannot give HDR pictures makes the option unavailable, however capable the
+    /// screen.
+    @Test func highDynamicRangeNeedsASessionThatGivesIt() async throws {
+        var scenario = fastScenario(.highPerformance)
+        scenario.makesHDRDisplays = false
+        let fixture = try Fixture([scenario])
+        let model = try await fixture.connectedModel()
+        model.windowScreenChanged(showsHDR: true)
+        #expect(model.offersHDR)
+        #expect(model.canShowHDR)
+        #expect(!model.isHDRAvailable)
+        model.disconnect()
+    }
+
+    /// In External Only the picture is on the monitor, so the monitor decides.
+    @Test func externalOnlyFollowsTheMonitor() async throws {
+        var fixture = try Fixture()
+        fixture.computer.display = .fitToDevice
+        let model = fixture.makeModel()
+        model.stageLayoutChanged(size: CGSize(width: 402, height: 874), safeArea: .zero, deviceScale: 3)
+        model.windowScreenChanged(showsHDR: true)
+        model.start()
+        try await waitUntil { model.phase == .connected }
+        #expect(model.selectedDisplay?.isHDR == true)
+        model.externalScreenChanged(monitor, preferredMode: .externalOnly)
+        try await waitUntil(timeout: .seconds(10)) { model.selectedDisplay?.isHDR == false }
+        model.externalScreenDisconnected()
+        try await waitUntil(timeout: .seconds(10)) { model.selectedDisplay?.isHDR == true }
+        model.disconnect()
+    }
+
     @Test func retinaCanBeTurnedOff() async throws {
         var fixture = try Fixture()
         fixture.computer.display = .fitToDevice

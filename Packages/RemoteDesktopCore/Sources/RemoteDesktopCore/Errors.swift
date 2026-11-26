@@ -152,6 +152,8 @@ public enum UnavailableReason: Sendable, Hashable {
     /// The media never arrived at all: something between the two machines (a firewall, a NAT, a
     /// VPN that carries TCP only) blocks the datagrams it travels in.
     case mediaBlocked
+    /// The connection is metered, or carries too little, for it: media runs at a reduced rate.
+    case lowBandwidth
     /// The remote machine's screen is locked or at its login window; it is possible once someone
     /// unlocks it.
     case remoteScreenLocked

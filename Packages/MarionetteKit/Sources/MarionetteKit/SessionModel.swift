@@ -77,6 +77,11 @@ public final class SessionModel: Identifiable {
     public private(set) var banner: SessionBanner?
     public private(set) var isRemoteScreenLocked = false
     public private(set) var isAudioMuted: Bool
+    /// High Dynamic Range: High Performance displays are HDR where the screen showing them can
+    /// show it. On unless the user turned it off; kept across sessions.
+    public private(set) var isHDREnabled: Bool
+    /// The screen the session's window is on can show HDR.
+    public private(set) var windowScreenShowsHDR = false
     public private(set) var quality: QualityPreset
     /// The furthest step (``ConnectionPhase/order``) the current attempt has reached; -1 before any.
     public private(set) var connectionProgress = -1
@@ -137,6 +142,10 @@ public final class SessionModel: Identifiable {
     @ObservationIgnored private var bannerTask: Task<Void, Never>?
     @ObservationIgnored private var timerTask: Task<Void, Never>?
     @ObservationIgnored private var sizerTask: Task<Void, Never>?
+    /// The latest display request on its way; the next waits for it.
+    @ObservationIgnored private var displayRequestTask: Task<Void, Never>?
+    /// What the connection's options asked of displays the back end makes by itself.
+    @ObservationIgnored private var wantsHDRAtConnect = false
     /// Bumped for every connection attempt so late callbacks from an old one are ignored.
     @ObservationIgnored private var attempt = 0
     @ObservationIgnored private var touchInterpreter = TouchInterpreter()
@@ -157,6 +166,8 @@ public final class SessionModel: Identifiable {
     @ObservationIgnored private var sizer: VirtualDisplaySizer?
     /// The virtual display asked for when connecting, if any.
     @ObservationIgnored private var requestedDisplay: VirtualDisplaySizer.Proposal?
+    /// Which virtual displays were last asked for in HDR, in order.
+    @ObservationIgnored private var requestedHDR: [Bool] = []
     /// The mode the user chose for this session from a failure ("Connect in Standard Mode").
     @ObservationIgnored private var modeOverride: ComputerConfiguration.Mode?
     /// The mode the automatic reconnects use after High Performance lost too much data. It lasts
@@ -230,6 +241,7 @@ public final class SessionModel: Identifiable {
         quality = computer.quality == .full ? .full : .adaptive
         let preferences = SessionPreferences(defaults: dependencies.defaults)
         isAudioMuted = dependencies.mutesAudio || preferences.isAudioMuted
+        isHDREnabled = preferences.isHDREnabled
         uiState = SessionUIState(preferences: preferences)
         lastShownPanel = preferences.inputPanel == .hidden ? preferences.defaultInputPanel : preferences.inputPanel
         inputPreferences = preferences
@@ -380,13 +392,17 @@ public final class SessionModel: Identifiable {
     private func sessionOptions(for configuration: ComputerConfiguration) -> SessionOptions {
         var displays = SessionOptions.DisplayPreference.physical(.all)
         requestedDisplay = nil
+        requestedHDR = []
+        wantsHDRAtConnect = wantsHDR(display: 0)
         if configuration.display == .fitToDevice, let proposal = virtualDisplayProposal() {
             // A Mac keeps the number of displays a session starts with, so a second one is asked
             // for now or not at all.
             var requests = [proposal.request]
             if configuration.hasSecondaryDisplay { requests.append(secondaryDisplayRequest(matching: proposal.request)) }
+            requests = withHDR(requests)
             displays = .virtual(requests)
             requestedDisplay = proposal
+            requestedHDR = requests.map(\.wantsHDR)
         }
         return SessionOptions(
             displays: displays,
@@ -395,7 +411,8 @@ public final class SessionModel: Identifiable {
             wantsAudio: configuration.audioEnabled && configuration.allowsAudio,
             wantsClipboard: configuration.clipboardEnabled && clipboard.mode != .off,
             requiresServerAuthentication: requiresProvenIdentity,
-            requiresEncryption: requiresEncryption
+            requiresEncryption: requiresEncryption,
+            wantsHDR: wantsHDRAtConnect
         )
     }
 
@@ -561,6 +578,11 @@ public final class SessionModel: Identifiable {
             paneChanged()
         } else {
             sizer = nil
+            // The back end made displays like the Mac's own, all as the options asked; a screen
+            // reported while connecting may want otherwise.
+            let virtualDisplays = layout.displays.filter { $0.kind == .virtual }.count
+            requestedHDR = Array(repeating: session.info.mode == .highPerformance && wantsHDRAtConnect, count: virtualDisplays)
+            displaysChangedScreens()
         }
     }
 
@@ -667,6 +689,9 @@ public final class SessionModel: Identifiable {
         sessionTasks.removeAll()
         sizerTask?.cancel()
         sizerTask = nil
+        // A request still waiting must not hold up the next session's.
+        displayRequestTask?.cancel()
+        displayRequestTask = nil
         timerTask?.cancel()
         timerTask = nil
         audio.stop()
@@ -889,6 +914,33 @@ public final class SessionModel: Identifiable {
         isAudioMuted = muted
         audio.isMuted = muted
         savePreferences()
+    }
+
+    /// Whether the session offers High Dynamic Range: High Performance, whose displays can be HDR.
+    public var offersHDR: Bool {
+        phase == .connected && info?.mode == .highPerformance
+    }
+
+    /// Whether a screen that shows the session can show HDR: the window's, or an attached
+    /// monitor's. Without one, High Dynamic Range does nothing and is shown off and disabled.
+    public var canShowHDR: Bool {
+        (0..<max(1, layout.displays.count)).contains { screenShowsHDR(display: $0) }
+    }
+
+    /// Whether High Dynamic Range can do anything now: a screen can show HDR and the session can
+    /// give HDR pictures (not in the constrained media profile, not on a device that cannot decode
+    /// them). The menus show it off and disabled otherwise; the choice itself is kept.
+    public var isHDRAvailable: Bool {
+        canShowHDR && features.highDynamicRange.isAvailable
+    }
+
+    /// Turns High Dynamic Range on or off, for this session and the ones after it. The displays
+    /// are asked for again at once.
+    public func setHDREnabled(_ enabled: Bool) {
+        guard enabled != isHDREnabled else { return }
+        isHDREnabled = enabled
+        savePreferences()
+        displaysChangedScreens()
     }
 
     public func setQuality(_ preset: QualityPreset) {
@@ -1197,7 +1249,46 @@ public final class SessionModel: Identifiable {
 
     /// Every virtual display the session has, for a first display of `first`.
     private func displayRequests(first: VirtualDisplayRequest) -> [VirtualDisplayRequest] {
-        hasSecondaryVirtualDisplay ? [first, secondaryDisplayRequest(matching: first)] : [first]
+        withHDR(hasSecondaryVirtualDisplay ? [first, secondaryDisplayRequest(matching: first)] : [first])
+    }
+
+    /// The requests, each asking for HDR when High Dynamic Range is on and the screen that shows its
+    /// display can show HDR: the first display is on the session's window, or the monitor in
+    /// External Only; the others are on the monitor when there is one, else one display switch away
+    /// on the window. (Mirroring shows the first display on the monitor too, which tone-maps it if
+    /// it must.) The back end grants HDR only where this device and the Mac take it as well.
+    private func withHDR(_ requests: [VirtualDisplayRequest]) -> [VirtualDisplayRequest] {
+        requests.enumerated().map { index, request in
+            var request = request
+            request.wantsHDR = wantsHDR(display: index)
+            return request
+        }
+    }
+
+    /// Whether the display at this position should be HDR; see ``withHDR(_:)``.
+    private func wantsHDR(display index: Int) -> Bool {
+        isHDREnabled && screenShowsHDR(display: index)
+    }
+
+    /// Whether the screen that shows the display at this position can show HDR; see ``withHDR(_:)``.
+    private func screenShowsHDR(display index: Int) -> Bool {
+        if index == 0 {
+            return externalDisplayMode == .externalOnly ? externalScreen?.showsHDR ?? false : windowScreenShowsHDR
+        }
+        return externalScreen?.showsHDR ?? windowScreenShowsHDR
+    }
+
+    /// Asks for these displays, and remembers which of them were asked for in HDR. Requests go out
+    /// in the order they are made: two at once (a monitor unplugged and the window's screen
+    /// changing) must not reach the back end the other way round.
+    private func requestDisplays(_ requests: [VirtualDisplayRequest], from configuration: any DisplayConfiguration) {
+        requestedHDR = requests.map(\.wantsHDR)
+        let previous = displayRequestTask
+        displayRequestTask = Task {
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            try? await configuration.setVirtualDisplays(requests)
+        }
     }
 
     /// The external display came or went: the secondary display takes its size, or the first's again.
@@ -1206,8 +1297,46 @@ public final class SessionModel: Identifiable {
               let configuration = session?.capabilities.displayConfiguration.value,
               let first = sizer?.lastProposal?.request ?? requestedDisplay?.request
         else { return }
-        let requests = displayRequests(first: first)
-        Task { try? await configuration.setVirtualDisplays(requests) }
+        requestDisplays(displayRequests(first: first), from: configuration)
+    }
+
+    /// A screen that shows a display started or stopped being able to show HDR, or High Dynamic
+    /// Range was turned on or off: the displays are asked for again, at the sizes they have. A
+    /// resize on its way carries the change instead.
+    private func displaysChangedScreens() {
+        // Asking again does nothing where the session gives no HDR pictures at all.
+        guard phase == .connected, sizer?.nextDeadline == nil, features.highDynamicRange.isAvailable,
+              let configuration = session?.capabilities.displayConfiguration.value
+        else { return }
+        let requests: [VirtualDisplayRequest]
+        if computer.display == .fitToDevice {
+            guard let first = sizer?.lastProposal?.request ?? requestedDisplay?.request else { return }
+            requests = displayRequests(first: first)
+        } else {
+            // High Performance showing the Mac's own screens: virtual displays like them, made by
+            // the back end, which are asked for again as they are.
+            let displays = layout.displays
+            guard !displays.isEmpty, displays.allSatisfy({ $0.kind == .virtual }) else { return }
+            requests = withHDR(displays.map { display in
+                let scale = max(1, Int(display.scale.rounded()))
+                return VirtualDisplayRequest(pointSize: PixelSize(width: display.pixelSize.width / scale, height: display.pixelSize.height / scale), scale: scale)
+            })
+        }
+        guard requests.map(\.wantsHDR) != requestedHDR else { return }
+        requestDisplays(requests, from: configuration)
+    }
+
+    /// The session's window is on a screen that can show HDR, or not: reported when the window
+    /// appears and whenever it moves to another screen (Stage Manager on an extended display).
+    public func windowScreenChanged(showsHDR: Bool) {
+        guard showsHDR != windowScreenShowsHDR else { return }
+        windowScreenShowsHDR = showsHDR
+        displaysChangedScreens()
+    }
+
+    /// Whether a display of the session is showing HDR pictures now.
+    public var isShowingHDR: Bool {
+        layout.displays.contains(where: \.isHDR)
     }
 
     private func paneChanged() {
@@ -1224,11 +1353,15 @@ public final class SessionModel: Identifiable {
         guard let deadline = sizer?.nextDeadline else { return }
         sizerTask = Task { [weak self] in
             try? await clock.sleep(for: .seconds(max(0, deadline - clock.uptime)))
-            guard let self, !Task.isCancelled, let proposal = self.sizer?.poll(at: clock.uptime),
-                  let configuration = self.session?.capabilities.displayConfiguration.value,
-                  !self.isCloseEnough(proposal.request)
-            else { return }
-            try? await configuration.setVirtualDisplays(self.displayRequests(first: proposal.request))
+            guard let self, !Task.isCancelled, let configuration = self.session?.capabilities.displayConfiguration.value else { return }
+            // A new size, or the one there is: a pane that moved to another screen may need HDR, or
+            // no longer have it, at any size.
+            let proposal = self.sizer?.poll(at: clock.uptime)
+            guard let first = proposal?.request ?? self.sizer?.lastProposal?.request ?? self.requestedDisplay?.request else { return }
+            let requests = self.displayRequests(first: first)
+            let resizes = proposal.map { !self.isCloseEnough($0.request) } ?? false
+            guard resizes || requests.map(\.wantsHDR) != self.requestedHDR else { return }
+            self.requestDisplays(requests, from: configuration)
         }
     }
 
@@ -1269,6 +1402,7 @@ public final class SessionModel: Identifiable {
             if externalDisplayMode == .externalOnly { paneChanged() }
         }
         if resized { resizeSecondaryDisplay() }
+        displaysChangedScreens()
     }
 
     /// The monitor went away: back to the device alone, with the input mode the user had.
@@ -1279,6 +1413,7 @@ public final class SessionModel: Identifiable {
         externalScreen = nil
         updateExternalRenderer(restart: false)
         resizeSecondaryDisplay()
+        displaysChangedScreens()
     }
 
     /// The user's choice; it replaces whatever was waiting to apply.
@@ -1923,6 +2058,7 @@ public final class SessionModel: Identifiable {
         preferences.accessoryPage = uiState.accessoryPage
         if uiState.zoomMode != .free { preferences.zoomMode = uiState.zoomMode }
         preferences.isAudioMuted = isAudioMuted
+        preferences.isHDREnabled = isHDREnabled
         preferences.save(to: dependencies.defaults)
     }
 }

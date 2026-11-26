@@ -61,6 +61,11 @@ extension SimulatedSessionCore {
         } else {
             capabilities.touch = .available(TouchInput(maximumContacts: scenario.touchContacts))
         }
+        if !isHighPerformance {
+            capabilities.highDynamicRange = .unavailable(.requiresMode(.highPerformance))
+        } else {
+            capabilities.highDynamicRange = scenario.makesHDRDisplays ? .available(()) : .unavailable(.notSupportedByServer)
+        }
         return capabilities
     }
 }
@@ -109,7 +114,8 @@ struct SimulatedDisplayConfiguration: DisplayConfiguration {
                     width: min(request.pointSize.width * request.scale, limits.maximumPixelSize.width),
                     height: min(request.pointSize.height * request.scale, limits.maximumPixelSize.height)
                 ),
-                scale: Double(request.scale)
+                scale: Double(request.scale),
+                isHDR: request.wantsHDR && core.scenario.makesHDRDisplays
             )
         }
         try await core.engine.reconfigure(displays: displays, kind: .virtual, delay: core.scenario.reconfigurationDelay)

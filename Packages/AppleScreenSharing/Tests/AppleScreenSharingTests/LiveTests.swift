@@ -686,4 +686,38 @@ struct LiveAppleScreenSharingTests {
         await session.disconnect()
         try await Task.sleep(for: .seconds(1))
     }
+
+    /// A display asked for in HDR gets 10-bit PQ pictures (macOS 27 and 15.6 both make them), and
+    /// SDR ones again when asked for in SDR.
+    @Test func aDisplayAskedForInHDRGetsHDRPictures() async throws {
+        var backend = AppleScreenSharingBackend()
+        backend.videoCodec = .hevc
+        backend.dynamicRange = .high
+        let hdr = VirtualDisplayRequest(pointSize: PixelSize(width: 1024, height: 768), scale: 1, wantsHDR: true)
+        let session = try await backend.connect(LiveHost.request(.require(.highPerformance), displays: .virtual([hdr])))
+        let id = try #require(session.layout.displays.first?.id)
+        let frames = session.frames(for: id)
+
+        func nextPicture(isHDR: Bool) async -> Bool {
+            for _ in 0..<200 {
+                guard let frame = await frames.next() else { return false }
+                let (format, transfer) = frame.surface.withUnsafeBuffer { buffer in
+                    (CVPixelBufferGetPixelFormatType(buffer), CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nil) as? String)
+                }
+                let pictureIsHDR = format == kCVPixelFormatType_ARGB2101010LEPacked && transfer == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String
+                if pictureIsHDR == isHDR { return true }
+            }
+            return false
+        }
+        #expect(await nextPicture(isHDR: true))
+        #expect(session.layout.displays.first?.isHDR == true)
+
+        var sdr = hdr
+        sdr.wantsHDR = false
+        try await #require(session.capabilities.displayConfiguration.value).setVirtualDisplays([sdr])
+        #expect(await nextPicture(isHDR: false))
+        #expect(session.layout.displays.first?.isHDR == false)
+        await session.disconnect()
+        try await Task.sleep(for: .seconds(1))
+    }
 }

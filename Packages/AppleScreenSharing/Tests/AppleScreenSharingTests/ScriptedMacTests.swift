@@ -1694,6 +1694,115 @@ private func expected(width: Int, height: Int, generation: (Int, Int) -> Int = {
         }
         #expect(ContinuousClock.now - started < .seconds(15))
     }
+
+    // MARK: HDR
+
+    /// Notes the back end makes, for what they say about offers.
+    final class Notes: Sendable {
+        let lines = Mutex<[String]>([])
+        var offers: [String] { lines.withLock { $0.filter { $0.hasPrefix("offered media for") } } }
+    }
+
+    /// The scripted Mac sends H.264 pictures whatever is offered; offering HEVC still lets a test
+    /// see what an HDR offer would carry.
+    static func hdrBackend(_ dynamicRange: AppleScreenSharingBackend.DynamicRangePreference, notes: Notes) -> AppleScreenSharingBackend {
+        var backend = Self.backend
+        backend.videoCodec = .hevc
+        backend.dynamicRange = dynamicRange
+        backend.diagnostics = { line in notes.lines.withLock { $0.append(line) } }
+        return backend
+    }
+
+    static func hdrSize(_ wantsHDR: Bool) -> VirtualDisplayRequest {
+        VirtualDisplayRequest(pointSize: PixelSize(width: 320, height: 200), scale: 1, wantsHDR: wantsHDR)
+    }
+
+    /// A display is asked for in HDR, and offered HDR pictures, only when it wants HDR, the device
+    /// takes it and the Mac makes it. The opening displays are always SDR.
+    @Test(arguments: [
+        // wants HDR, device, Mac makes HDR, display asked in HDR, offered HDR
+        (true, AppleScreenSharingBackend.DynamicRangePreference.high, true, true, true),
+        (true, .high, false, true, false),
+        (true, .standard, true, false, false),
+        (false, .high, true, false, false),
+    ])
+    func hdrNeedsTheDisplayTheDeviceAndTheMac(wants: Bool, device: AppleScreenSharingBackend.DynamicRangePreference, macMakesHDR: Bool, askedInHDR: Bool, offeredHDR: Bool) async throws {
+        let transport = Self.transport { $0.makesHDRDisplays = macMakesHDR }
+        let notes = Notes()
+        let session = try await Self.hdrBackend(device, notes: notes).connect(Self.request(transport, displays: [Self.hdrSize(wants)]))
+        let mac = transport.latest
+        #expect(mac.configurations.first == [.opening])
+        let last = try #require(mac.configurations.last?.first)
+        #expect(last.isHDR == askedInHDR)
+        #expect(notes.offers.count == 2)
+        #expect(notes.offers.first?.hasSuffix("HDR") == false, "the opening display's offer")
+        #expect(notes.offers.last?.hasSuffix("HDR") == offeredHDR)
+        await session.disconnect()
+    }
+
+    /// The virtual displays made like the Mac's own screens are HDR as the session's options say.
+    @Test(arguments: [true, false])
+    func displaysLikeTheMacsOwnFollowTheOptions(wantsHDR: Bool) async throws {
+        let transport = Self.transport()
+        let notes = Notes()
+        var request = Self.request(transport)
+        request.options.displays = .physical(.all)
+        request.options.wantsHDR = wantsHDR
+        let session = try await Self.hdrBackend(.high, notes: notes).connect(request)
+        let mac = transport.latest
+        #expect(mac.configurations.last?.allSatisfy { $0.isHDR == wantsHDR } == true)
+        await session.disconnect()
+    }
+
+    /// A display that stops wanting HDR (a monitor without it took over) is asked for again in SDR.
+    @Test func aDisplayCanGoFromHDRToSDRAndBack() async throws {
+        let transport = Self.transport()
+        let notes = Notes()
+        let session = try await Self.hdrBackend(.high, notes: notes).connect(Self.request(transport, displays: [Self.hdrSize(true)]))
+        let mac = transport.latest
+        let configuration = try #require(session.capabilities.displayConfiguration.value)
+        try await configuration.setVirtualDisplays([Self.hdrSize(false)])
+        #expect(mac.configurations.last?.first?.isHDR == false)
+        #expect(notes.offers.last?.hasSuffix("HDR") == false)
+        try await configuration.setVirtualDisplays([Self.hdrSize(true)])
+        #expect(mac.configurations.last?.first?.isHDR == true)
+        #expect(notes.offers.last?.hasSuffix("HDR") == true)
+        #expect(mac.configurations.count == 4)
+        await session.disconnect()
+    }
+
+    /// The constrained profile gives HDR up with the rate.
+    @Test func steppingDownGivesHDRUp() async throws {
+        let transport = Self.transport {
+            $0.pictureInterval = .milliseconds(40)
+            $0.packetPayload = 100
+        }
+        let notes = Notes()
+        var backend = Self.hdrBackend(.high, notes: notes)
+        backend.sessionTiming.lossWindow = .milliseconds(400)
+        backend.sessionTiming.lossWindowPackets = 40
+        let session = try await backend.connect(Self.request(transport, displays: [Self.hdrSize(true)]))
+        let mac = transport.latest
+        #expect(mac.configurations.last?.first?.isHDR == true)
+        #expect(session.capabilities.highDynamicRange.isAvailable)
+        mac.losePackets(every: 3)
+        await until("the step down", timeout: .seconds(5)) { mac.configurations.count == 3 }
+        #expect(mac.configurations.last?.first?.isHDR == false)
+        #expect(session.capabilities.highDynamicRange.unavailableReason == .lowBandwidth)
+        await session.disconnect()
+    }
+
+    /// A session that starts in the constrained profile (a metered network) has no HDR to offer.
+    @Test func aConstrainedStartHasNoHDR() async throws {
+        let transport = Self.transport()
+        let notes = Notes()
+        var backend = Self.hdrBackend(.high, notes: notes)
+        backend.sessionTiming.bandwidthProfile = .constrained
+        let session = try await backend.connect(Self.request(transport, displays: [Self.hdrSize(true)]))
+        #expect(session.capabilities.highDynamicRange.unavailableReason == .lowBandwidth)
+        #expect(transport.latest.configurations.last?.first?.isHDR == false)
+        await session.disconnect()
+    }
 }
 
 @Suite struct FramebufferSnapshotTests {

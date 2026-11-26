@@ -26,6 +26,11 @@ final class ExternalDisplayController {
     private(set) var session: SessionModel?
     /// The size of the monitor's scene, once it has been laid out.
     @ObservationIgnored private var screen: ExternalScreen?
+    /// The monitor can show HDR, and the screen the display window is on can: each source keeps its
+    /// own, since a monitor can take over from a window that is still open.
+    @ObservationIgnored private var monitorShowsHDR = false
+    @ObservationIgnored private var windowShowsHDR = false
+    private var showsHDR: Bool { isWindow ? windowShowsHDR : monitorShowsHDR }
 
     /// Whether the system mirrors the device when the app draws nothing (the iOS 27 accessory).
     var systemMirrors: Bool {
@@ -84,9 +89,18 @@ final class ExternalDisplayController {
     /// The monitor's scene was laid out.
     func screenChanged(size: CGSize, scale: CGFloat) {
         guard size.width > 0, size.height > 0 else { return }
-        let new = ExternalScreen(size: ViewSize(width: size.width, height: size.height), scale: scale)
+        let new = ExternalScreen(size: ViewSize(width: size.width, height: size.height), scale: scale, showsHDR: showsHDR)
         guard new != screen else { return }
         screen = new
+        forward()
+    }
+
+    /// The monitor's scene, or the display window, is on a screen that can show HDR, or not.
+    func screenHDRChanged(_ showsHDR: Bool, inWindow: Bool) {
+        if inWindow { windowShowsHDR = showsHDR } else { monitorShowsHDR = showsHDR }
+        guard var screen, screen.showsHDR != self.showsHDR else { return }
+        screen.showsHDR = self.showsHDR
+        self.screen = screen
         forward()
     }
 
@@ -123,6 +137,7 @@ struct ExternalDisplayContent: View {
         GeometryReader { proxy in
             ZStack {
                 Color.black
+                ScreenHDRReader { controller.screenHDRChanged($0, inWindow: false) }
                 if let session = controller.session, session.externalDisplay != nil {
                     DisplaySurface(renderer: session.externalRenderer)
                     // A monitor is looked at from across a desk or a room.
@@ -147,6 +162,7 @@ struct DisplayWindowContent: View {
         GeometryReader { proxy in
             ZStack {
                 Color.black
+                ScreenHDRReader { controller.screenHDRChanged($0, inWindow: true) }
                 if let session = controller.session, controller.isWindow, session.externalDisplay != nil {
                     DisplaySurface(renderer: session.externalRenderer)
                         .accessibilityElement()

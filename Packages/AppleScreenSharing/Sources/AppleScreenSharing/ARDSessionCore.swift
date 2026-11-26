@@ -133,6 +133,9 @@ final class ARDSessionCore: Sendable, InputSink {
         /// This device found no decoder for the stream the Mac sends: its pictures arrive and cannot
         /// be shown. A stream that never starts then says so, rather than blaming the Mac.
         var foundNoDecoder = false
+        /// This device found no decoder for an HDR stream: the displays are to be asked for in SDR.
+        /// Taken by ``takeHDRRefusal()``.
+        var refusedHDR = false
         var layout: DesktopLayout = .empty
         var capabilities = SessionCapabilities()
         var hubs: [DisplayID: FrameHub] = [:]
@@ -216,6 +219,14 @@ final class ARDSessionCore: Sendable, InputSink {
 
     var mediaSilenceLimit: Duration { timing.mediaSilenceLimit }
     var mediaRepairLimit: Duration { timing.mediaRepairLimit }
+
+    /// Whether this device has found it cannot decode an HDR stream since last asked.
+    func takeHDRRefusal() -> Bool {
+        shared.withLock { shared in
+            defer { shared.refusedHDR = false }
+            return shared.refusedHDR
+        }
+    }
 
     /// Ends a High Performance session whose pictures have stopped for good: the control
     /// connection can outlive the media path (a network change, a firewall, a sleeping access
@@ -330,10 +341,11 @@ final class ARDSessionCore: Sendable, InputSink {
     init(
         connection: ARDConnection, transport: any TransportProvider, serverInit: ServerInit, mode: SessionMode, options: SessionOptions,
         security: String, isEncrypted: Bool = true, serverAuthenticated: Bool = false, videoCodec: MediaVideoCodec = .hevc,
-        keyStyle: X11Keysym.ModifierStyle = .mac, inputKey: Data? = nil, timing: SessionTiming = SessionTiming(),
+        allowsHDR: Bool = false, keyStyle: X11Keysym.ModifierStyle = .mac, inputKey: Data? = nil, timing: SessionTiming = SessionTiming(),
         diagnostics: (@Sendable (String) -> Void)? = nil
     ) {
         self.videoCodec = videoCodec
+        self.allowsHDR = allowsHDR && videoCodec == .hevc
         self.keyStyle = keyStyle
         inputCipher = timing.encryptsInput ? inputKey.flatMap { try? InputCipher(key: $0) } : nil
         self.timing = timing
@@ -755,6 +767,8 @@ final class ARDSessionCore: Sendable, InputSink {
 
     /// The picture codec High Performance asks the Mac for.
     let videoCodec: MediaVideoCodec
+    /// Whether this device takes HDR pictures at all: displays asked for HDR get it only then.
+    let allowsHDR: Bool
 
     let diagnostics: (@Sendable (String) -> Void)?
 
@@ -810,7 +824,12 @@ final class ARDSessionCore: Sendable, InputSink {
             note("leg \(slot.leg): the decoder skipped a picture (\(status)); asked for a refresh")
             receiver?.requestRefresh(leg: slot.leg)
         } catch .unsupportedStream(let status) {
-            shared.withLock { $0.foundNoDecoder = true }
+            // A device that decodes the Mac's 8-bit pictures but not its HDR ones can go on in SDR.
+            if (VideoDecoder.bitsPerComponent(of: picture) ?? 8) > 8 {
+                shared.withLock { $0.refusedHDR = true }
+            } else {
+                shared.withLock { $0.foundNoDecoder = true }
+            }
             rebuild(slot, because: "decoding failed (unsupportedStream(status: \(status)))")
         } catch {
             rebuild(slot, because: "decoding failed (\(error))")
@@ -856,16 +875,23 @@ final class ARDSessionCore: Sendable, InputSink {
         case .success(let picture):
             // The Mac may now predict a refresh picture from this one, which the decoder holds.
             shared.withLock { $0.mediaReceiver }?.acknowledge(leg: leg, ssrc: picture.source, timestamp: picture.timestamp)
+            let isHDR = picture.isHDR
             let target: (hub: FrameHub, id: DisplayID, generation: UInt64, becameLive: DesktopLayout?)? = shared.withLock { shared in
                 guard shared.legDisplays.indices.contains(leg) else { return nil }
                 let id = shared.legDisplays[leg]
                 guard let hub = shared.hubs[id], let display = shared.layout[id] else { return nil }
                 // A picture of the size the layout promises is the display coming up.
-                guard display.pixelSize == PixelSize(width: picture.width, height: picture.height) else { return nil }
+                guard display.pixelSize == PixelSize(width: picture.width, height: picture.height),
+                      let index = shared.layout.displays.firstIndex(where: { $0.id == id })
+                else { return nil }
                 var announce: DesktopLayout?
-                if display.state != .live, !shared.awaitingNewLayout,
-                   let index = shared.layout.displays.firstIndex(where: { $0.id == id }) {
+                if display.state != .live, !shared.awaitingNewLayout {
                     shared.layout.displays[index].state = .live
+                    announce = shared.layout
+                }
+                // Whether a display is HDR is what its pictures are, whatever was asked for.
+                if display.isHDR != isHDR {
+                    shared.layout.displays[index].isHDR = isHDR
                     announce = shared.layout
                 }
                 return (hub, id, shared.layout.generation, announce)
@@ -1057,6 +1083,18 @@ final class ARDSessionCore: Sendable, InputSink {
         deliverInput(update.release)
         let capabilities = update.capabilities
         note(allowed ? "the Mac takes this viewer's input again" : "the Mac takes no input from this viewer")
+        events.send(.capabilitiesChanged(capabilities))
+    }
+
+    /// HDR became impossible for the rest of the session: the stream stepped down to the
+    /// constrained profile, or this device cannot decode the Mac's HDR pictures.
+    func setHDRUnavailable(_ reason: UnavailableReason) {
+        let capabilities: SessionCapabilities? = shared.withLock { shared in
+            guard !shared.state.isDisconnected, shared.capabilities.highDynamicRange.isAvailable else { return nil }
+            shared.capabilities.highDynamicRange = .unavailable(reason)
+            return shared.capabilities
+        }
+        guard let capabilities else { return }
         events.send(.capabilitiesChanged(capabilities))
     }
 

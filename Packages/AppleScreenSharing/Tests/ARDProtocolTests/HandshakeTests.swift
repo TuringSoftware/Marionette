@@ -216,6 +216,21 @@ import Testing
         #expect(reader.isAtEnd)
     }
 
+    @Test func anHDRDisplayMarksEveryModeHDR() throws {
+        let sdr = VirtualDisplayMode.fitting(pointWidth: 1440, pointHeight: 900, scale: 2)
+        let hdr = VirtualDisplayMode.fitting(pointWidth: 1440, pointHeight: 900, scale: 2, isHDR: true)
+        func hdrWords(_ mode: VirtualDisplayMode) throws -> [UInt32] {
+            var reader = WireReader(ClientMessage.setDisplayConfiguration([mode], dynamic: true))
+            try reader.skip(4 + 8 + 0x9c)
+            return try (0..<5).map { _ in
+                try reader.skip(4 * 4 + 8)
+                return try reader.u32()
+            }
+        }
+        #expect(try hdrWords(sdr) == [0, 0, 0, 0, 0])
+        #expect(try hdrWords(hdr) == [1, 1, 1, 1, 1])
+    }
+
     @Test func virtualModeIsHeldWithinWhatAMacAccepts() {
         // Too small for a 2x display: the same pixels at 1x, which a Mac does make.
         let small = VirtualDisplayMode.fitting(pointWidth: 320, pointHeight: 200, scale: 2)

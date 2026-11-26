@@ -140,6 +140,11 @@ func highPerformance(_ arguments: Arguments) async throws {
             pointWidth: UInt32(sizeParts[0]), pointHeight: UInt32(sizeParts[1])
         )
         : VirtualDisplayMode.fitting(pointWidth: sizeParts[0], pointHeight: sizeParts[1], scale: scale)
+    // --hdr on asks for an HDR display, and offers HDR pictures for it once the Mac marks its port HDR;
+    // --offer-hdr offers them whatever the Mac says.
+    var wantedDisplay = wanted
+    wantedDisplay.isHDR = arguments.option("hdr") == "on"
+    let offersHDRAlways = arguments.flags.contains("offer-hdr")
 
     var provider: any TransportProvider = DirectTransportProvider(peer: Endpoint(host: arguments.host, port: arguments.port))
     let loss = (Double(arguments.option("loss") ?? "0") ?? 0) / 100
@@ -214,7 +219,7 @@ func highPerformance(_ arguments: Arguments) async throws {
         connection.send(offer.message())
         portsAnnounced = false
         offerOutstanding = true
-        log("offered the stream for \(layout.framebufferWidth) × \(layout.framebufferHeight)")
+        log("offered the stream for \(layout.framebufferWidth) × \(layout.framebufferHeight)\(offer.videos[0].offersHDR ? " with HDR modes" : "")")
     }
 
     events: while true {
@@ -254,9 +259,10 @@ func highPerformance(_ arguments: Arguments) async throws {
             try await offerIfReady()
         case .mediaStream(let body):
             switch try MediaReply.parse(body) {
-            case .ports(let audio, let video, let second):
-                log("the Mac will send from ports \(audio) (sound) and \(video) (picture)\(second.map { ", \($0)" } ?? "")")
+            case .ports(let audio, let video, let second, let hdr):
+                log("the Mac will send from ports \(audio) (sound) and \(video) (picture)\(second.map { ", \($0)" } ?? ""); HDR: \(hdr)")
                 ports = MediaStreamReceiver.Ports(audio: audio, video: [video])
+                offer.videos[0].offersHDR = offersHDRAlways || hdr.first == true
                 portsAnnounced = true
                 try await offerIfReady()
             case .answer(let legs):
@@ -268,8 +274,8 @@ func highPerformance(_ arguments: Arguments) async throws {
                     // stream; it is offered again for the new display.
                     sessionSizeSent = true
                     layoutIsCurrent = false
-                    connection.send(ClientMessage.setDisplayConfiguration([wanted], dynamic: true))
-                    log("asked for \(wanted.pointWidth) × \(wanted.pointHeight) pt at \(wanted.pixelWidth / wanted.pointWidth)x")
+                    connection.send(ClientMessage.setDisplayConfiguration([wantedDisplay], dynamic: true))
+                    log("asked for \(wanted.pointWidth) × \(wanted.pointHeight) pt at \(wanted.pixelWidth / wanted.pointWidth)x\(wantedDisplay.isHDR ? ", HDR" : "")")
                 }
             case .failure(let failure):
                 throw Failure("the Mac refused the media stream: \(failure)")
@@ -304,18 +310,15 @@ func highPerformance(_ arguments: Arguments) async throws {
         print("decoded:      \(decoded.pictures) pictures, \(decoded.failures) failures, \(decoder.isHardwareAccelerated == true ? "hardware" : "software") decoder")
         print(String(format: "              %d audio samples (%.2f s), peak %.4f, %d failures", decoded.audioSamples, Double(decoded.audioSamples) / 48_000, decoded.audioPeak, decoded.audioFailures))
         if let last = decoded.last {
-            let pixels: Data = last.surface.withUnsafeBuffer { buffer in
-                CVPixelBufferLockBaseAddress(buffer, .readOnly)
-                defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-                let stride = CVPixelBufferGetBytesPerRow(buffer)
-                var packed = Data(capacity: last.width * last.height * 4)
-                for row in 0..<last.height {
-                    packed.append(Data(bytes: CVPixelBufferGetBaseAddress(buffer)! + row * stride, count: last.width * 4))
-                }
-                return packed
+            let (format, transfer) = last.surface.withUnsafeBuffer { buffer in
+                (CVPixelBufferGetPixelFormatType(buffer), CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nil) as? String)
             }
+            let fourCC = String(bytes: withUnsafeBytes(of: format.bigEndian) { Array($0) }, encoding: .ascii) ?? "\(format)"
+            print("              last picture: \(fourCC), transfer \(transfer ?? "untagged")")
+            let size = PixelSize(width: last.width, height: last.height)
+            let frame = DisplayFrame(display: DisplayID(1), surface: last.surface, pixelSize: size, damage: .full(size), layoutGeneration: 0)
             let png = output + ".png"
-            try writePNG(pixels: pixels, size: PixelSize(width: last.width, height: last.height), to: URL(fileURLWithPath: png))
+            try writePNG(frame: frame, to: URL(fileURLWithPath: png))
             print("wrote \(png) (last decoded picture, \(last.width) × \(last.height))")
         }
         guard decoded.pictures > 0, decoded.failures == 0 else { throw Failure("decoding failed") }

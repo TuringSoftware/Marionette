@@ -36,9 +36,12 @@ public struct ExternalScreen: Sendable, Hashable {
     public var size: ViewSize
     /// Pixels per point.
     public var scale: Double
+    /// The monitor can show HDR.
+    public var showsHDR: Bool
 
-    public init(size: ViewSize, scale: Double) {
+    public init(size: ViewSize, scale: Double, showsHDR: Bool = false) {
         self.size = size
         self.scale = scale
+        self.showsHDR = showsHDR
     }
 }

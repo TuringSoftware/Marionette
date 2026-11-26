@@ -113,6 +113,8 @@ public struct SessionFeatures: Sendable, Hashable {
     /// Curtain mode, and whether the remote machine says its curtain is up.
     public var curtain: Availability = .unavailable(.notSupportedByBackend)
     public var isCurtained = false
+    /// HDR pictures, which High Dynamic Range asks for.
+    public var highDynamicRange: Availability = .unavailable(.notSupportedByBackend)
     public var maximumVirtualDisplays = 0
     public var canSelectPhysicalDisplays = false
     /// The remote machine takes fingers as they are, as a touch screen of its own; `nil` when it
@@ -132,6 +134,7 @@ public struct SessionFeatures: Sendable, Hashable {
         remoteActions = RemoteAction.allCases.filter(supported.contains)
         curtain = Availability(capabilities.curtain)
         isCurtained = capabilities.curtain.value?.isCurtained ?? false
+        highDynamicRange = Availability(capabilities.highDynamicRange)
         if let limits = capabilities.displayConfiguration.value?.limits {
             maximumVirtualDisplays = limits.maximumVirtualDisplays
             canSelectPhysicalDisplays = limits.canSelectPhysicalDisplays

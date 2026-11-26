@@ -161,6 +161,10 @@ struct MarionetteCommands: Commands {
                     }
                 }
             }
+            if let session, session.offersHDR {
+                Toggle("High Dynamic Range", isOn: Binding(get: { session.isHDREnabled && session.isHDRAvailable }, set: { session.setHDREnabled($0) }))
+                    .disabled(!session.isHDRAvailable)
+            }
             Button("Files…") { session?.setFilesPresented(true) }
                 .keyboardShortcut(KeyEquivalent(AppShortcut.files), modifiers: AppShortcut.modifiers)
             Toggle("Mute Sound", isOn: Binding(get: { session?.isAudioMuted == true }, set: { session?.setAudioMuted($0) }))

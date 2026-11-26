@@ -12,6 +12,7 @@ let package = Package(
         .package(path: "../../Packages/RemoteDesktopTransport"),
         .package(path: "../../Packages/AppleScreenSharing"),
         .package(path: "../../Packages/RemoteDesktopDecode"),
+        .package(path: "../../Packages/RemoteDesktopMedia"),
         // Linking the VNC back end makes the built tool GPL-3.0-or-later; its own sources stay Apache-2.0.
         .package(path: "../../Packages/SwiftVNCClient"),
     ],
@@ -25,6 +26,7 @@ let package = Package(
                 .product(name: "ARDProtocol", package: "AppleScreenSharing"),
                 .product(name: "ARDCrypto", package: "AppleScreenSharing"),
                 .product(name: "RemoteDesktopDecode", package: "RemoteDesktopDecode"),
+                .product(name: "RemoteDesktopRender", package: "RemoteDesktopMedia"),
                 .product(name: "VNCBackend", package: "SwiftVNCClient"),
             ]
         ),

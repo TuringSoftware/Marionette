@@ -287,4 +287,50 @@ private func psnr(_ a: [UInt8], _ b: [UInt8]) -> Double {
         #expect(DecoderCapabilities.probeHEVC444())
         #expect(DecoderCapabilities.decodesHEVC444InHardware)
     }
+
+    @Test func theTenBitProbeSampleIsOneWholeKeyframe() {
+        let units = AnnexB.nalUnits(in: DecoderCapabilities.hevc444TenBitSample)
+        #expect(units.map { $0[$0.startIndex] >> 1 & 0x3f } == [32, 33, 34, 20])
+    }
+
+    /// An M3 Mac decodes it in hardware; an older Apple silicon Mac may not, so this only asks
+    /// that the probe and its remembered answer agree.
+    @Test func theTenBitProbeAgreesWithItself() {
+        #expect(DecoderCapabilities.probe(DecoderCapabilities.hevc444TenBitSample) == DecoderCapabilities.decodesHEVC444TenBitInHardware)
+    }
+}
+
+@Suite struct DeepPictureTests {
+    /// A 10-bit stream decodes to 10-bit RGB that keeps the stream's colour tags, which is what
+    /// lets the renderer show it as HDR.
+    @Test func aTenBitStreamDecodesToTenBitRGBWithItsColourTags() throws {
+        let decoded = Mutex<DecodedPicture?>(nil)
+        let decoder = VideoDecoder { result in
+            if case .success(let picture) = result { decoded.withLock { $0 = picture } }
+        }
+        try decoder.decode(EncodedPicture(codec: .hevc, nalUnits: AnnexB.nalUnits(in: DecoderCapabilities.hevc444TenBitSample), isKeyframe: true, timestamp: 0))
+        decoder.finishPending()
+        let picture = try #require(decoded.withLock { $0 })
+        #expect(picture.width == 64 && picture.height == 64)
+        picture.surface.withUnsafeBuffer { buffer in
+            #expect(CVPixelBufferGetPixelFormatType(buffer) == VideoDecoder.deepPixelFormat)
+            let transfer = CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nil) as? String
+            #expect(transfer == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String)
+            let primaries = CVBufferCopyAttachment(buffer, kCVImageBufferColorPrimariesKey, nil) as? String
+            #expect(primaries == kCVImageBufferColorPrimaries_ITU_R_2020 as String)
+        }
+    }
+
+    @Test func anEightBitStreamStillDecodesToBGRA() throws {
+        let decoded = Mutex<DecodedPicture?>(nil)
+        let decoder = VideoDecoder { result in
+            if case .success(let picture) = result { decoded.withLock { $0 = picture } }
+        }
+        try decoder.decode(EncodedPicture(codec: .hevc, nalUnits: AnnexB.nalUnits(in: DecoderCapabilities.hevc444Sample), isKeyframe: true, timestamp: 0))
+        decoder.finishPending()
+        let picture = try #require(decoded.withLock { $0 })
+        picture.surface.withUnsafeBuffer { buffer in
+            #expect(CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA)
+        }
+    }
 }

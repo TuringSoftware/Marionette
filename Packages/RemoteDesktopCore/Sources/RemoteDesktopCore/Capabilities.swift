@@ -35,6 +35,9 @@ public struct SessionCapabilities: Sendable {
     /// Fingers go to the remote machine as they are (``InputEvent/touch(_:)``), as on a touch screen
     /// of its own, instead of being turned into pointer input here.
     public var touch: Capability<TouchInput> = .unavailable(.notSupportedByBackend)
+    /// HDR pictures for displays asked for in HDR (``VirtualDisplayRequest/wantsHDR``,
+    /// ``SessionOptions/wantsHDR``): whether the session can give them at all now.
+    public var highDynamicRange: Capability<Void> = .unavailable(.notSupportedByBackend)
 
     public init() {}
 }

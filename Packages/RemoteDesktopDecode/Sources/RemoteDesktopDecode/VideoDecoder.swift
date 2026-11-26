@@ -33,13 +33,22 @@ public struct EncodedPicture: Sendable {
 }
 
 public struct DecodedPicture: Sendable {
-    /// 32-bit BGRA, IOSurface-backed, Metal-compatible. Carries the stream's colour attachments.
+    /// IOSurface-backed and Metal-compatible, carrying the stream's colour attachments: 32-bit BGRA
+    /// for an 8-bit stream, 10-bit packed RGB (``VideoDecoder/deepPixelFormat``) for a deeper one.
     public var surface: CVReadOnlyPixelBuffer
     public var width: Int
     public var height: Int
     public var timestamp: UInt32
     /// The ``EncodedPicture/source`` of the picture.
     public var source: UInt32 = 0
+
+    /// Whether the picture is HDR as a Mac sends it, and as the renderer shows it: its stream is
+    /// tagged with the PQ transfer function.
+    public var isHDR: Bool {
+        surface.withUnsafeBuffer { buffer in
+            CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nil) as? String == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String
+        }
+    }
 }
 
 public enum VideoDecoderError: Error, Sendable, Equatable {
@@ -94,6 +103,10 @@ public final class VideoDecoder: Sendable {
 
     /// Whether the current session decodes in hardware. `nil` before the first keyframe.
     public var isHardwareAccelerated: Bool? { lock.withLock { $0.isHardwareAccelerated } }
+
+    /// What pictures of streams of more than 8 bits are decoded to: 10 bits a component in one
+    /// plane, which Metal reads as `bgr10a2Unorm`.
+    public static let deepPixelFormat: OSType = kCVPixelFormatType_ARGB2101010LEPacked
 
     /// - Parameters:
     ///   - allowsSoftwareDecoding: Fall back to a software decoder when the hardware one refuses.
@@ -200,7 +213,7 @@ public final class VideoDecoder: Sendable {
             throw .pictureTooLarge(width: Int(dimensions.width), height: Int(dimensions.height))
         }
         let imageAttributes: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferPixelFormatTypeKey: Self.bitsPerComponent(of: description) > 8 ? Self.deepPixelFormat : kCVPixelFormatType_32BGRA,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferMetalCompatibilityKey: true,
         ]
@@ -240,6 +253,20 @@ public final class VideoDecoder: Sendable {
             state.isHardwareAccelerated = hardware
             state.generation &+= 1
         }
+    }
+
+    /// The bits per colour component of a keyframe's stream, from its parameter sets; `nil` when it
+    /// has none that describe one.
+    public static func bitsPerComponent(of picture: EncodedPicture) -> Int? {
+        let (sets, _) = partition(picture.nalUnits, codec: picture.codec)
+        guard !sets.isEmpty, let description = try? makeFormat(codec: picture.codec, parameterSets: sets) else { return nil }
+        return bitsPerComponent(of: description)
+    }
+
+    /// The stream's bits per colour component, as CoreMedia reads them from its sequence parameter set.
+    static func bitsPerComponent(of description: CMVideoFormatDescription) -> Int {
+        let value = CMFormatDescriptionGetExtension(description, extensionKey: kCMFormatDescriptionExtension_BitsPerComponent)
+        return (value as? NSNumber)?.intValue ?? 8
     }
 
     // MARK: Bitstream helpers
