@@ -30,10 +30,28 @@ When the system offers no API for something, leave the feature out; do not work 
 
 ### Wording
 
-- Keep text short. Before explaining a control in words, ask whether the control could explain
-  itself. Settings are not help pages.
-- Text does not change with state unless it must, as in an error message.
-- A menu or button title fits on one line.
+Every line of text is something to read, translate and review. Text earns its place only by telling
+people something the screen does not already show them.
+
+- **Say nothing the screen already says.** No footer that restates its section's title or its
+  controls' labels, and no description of what a self-evident control does. A section of toggles
+  titled "Password Security" needs no "How this device keeps the password" under it.
+- **Let the interface explain itself.** Before writing a description, ask whether a clearer control,
+  a better default or a disabled state would make it unnecessary, and change the interface instead.
+  A control that does not apply is disabled, and switched off if it is a toggle, rather than
+  explained. Settings are not help pages.
+- **One sentence, where one is needed.** Do not add a second sentence that restates the first or
+  tells a typical user what the context already makes plain.
+- **No text that varies with state**, unless it must: errors, and warnings about a choice the person
+  just made. Two variants that say much the same thing are one text too many.
+- **Empty states are a title and an action.** Instructions belong where they are acted on.
+- **Warn about what cannot be seen or undone**: losing data, weakening security, an irreversible
+  choice. Those warnings stay even where everything else is trimmed.
+- **Show only what people care about.** No labels for internal distinctions the person already chose
+  or never needs (a connection's type on its card), and no text on surfaces that work by touch, such
+  as the trackpad.
+- **Titles and labels are short nouns.** "SSH Tunnel", not "Through an SSH tunnel". A menu or button
+  title fits on one line, in the iPad menu bar too.
 
 ### Accessibility
 

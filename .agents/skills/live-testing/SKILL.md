@@ -39,6 +39,10 @@ A Mac serves one viewer in High Performance, and every simulator shares this Mac
   a regression.
 - Keep runs short, run long ones in the background with their output in a file, and give every
   `marionettectl` run a `--timeout`. A hung live run otherwise holds the Mac for good.
+- Check a background run every 10 minutes. `swift test` holds its output back when it writes to a
+  file, so a log that stops growing does not say which test hangs: `sample <pid> 1` on the
+  `swiftpm-testing-helper` process does. A thread waiting in `recv` means the machine stopped
+  answering; check that it still sends its banner before running the test again on its own.
 - Run the UI tests one simulator at a time. Several at once starve the Mac VM beside them.
 
 ## Leave the machine as you found it

@@ -46,5 +46,8 @@ and automation both use.
   notes and scratch files stay outside the repository.
 - **The developer's Mac is not yours.** Do not close or move their windows, change system settings or
   use `sudo`; give them the command when a step needs it.
+- **Watch long runs.** Check a command running in the background at least every 10 minutes. Output
+  that has not grown in that time means it is stuck: find out why, stop it and tell the person,
+  rather than wait on it.
 - **Stay in scope.** Do what was asked; propose the rest. When told a change made things worse,
   revert it fully first.
