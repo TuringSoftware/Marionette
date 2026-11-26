@@ -54,7 +54,8 @@ On the Mac you connect to, turn on **Screen Sharing** (System Settings › Gener
 ## Documentation
 
 - [Architecture](Docs/architecture.md): the layers, the packages and the decisions behind them.
-- [Testing](Docs/testing.md): unit, UI, screenshot and live tests, and `marionettectl`.
+- [Testing](Docs/testing.md): unit, UI, screenshot and live tests, `marionettectl`, continuous
+  integration and releases.
 - [Test machines](Docs/test-machines.md): setting up the Macs and VNC servers the live tests use.
 - [Apple Screen Sharing protocol](Docs/protocol/apple-screen-sharing.md): what the app relies on, and
   how each part was verified.

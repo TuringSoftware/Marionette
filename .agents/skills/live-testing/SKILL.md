@@ -16,6 +16,10 @@ conversation, in a file in the repository, or in a commit.
 
 - Never ask for them in the conversation. Ask the person to run `Scripts/set-test-host.sh [profile]`
   in their own terminal, and to tell you only the profile name.
+- `Scripts/with-test-host.sh` without `--profile` uses `MARIONETTE_TEST_HOST_PROFILE` from `.env`
+  (`Scripts/env.sh check MARIONETTE_TEST_HOST_PROFILE`). When the person names the profile to use
+  from now on, save it with `Scripts/env.sh set MARIONETTE_TEST_HOST_PROFILE <name>`. Only the
+  name goes in `.env`; the machine's details stay in the keychain.
 - Run every command that needs them through `Scripts/with-test-host.sh [--profile NAME]`. Never read
   the keychain items yourself.
 - The wrapper filters only what the command prints. Files a command writes are not filtered: result

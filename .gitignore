@@ -5,6 +5,10 @@ DerivedData/
 DerivedData-*/
 xcuserdata/
 .claude/settings.local.json
+# Local settings (see .env.example), and copies Scripts/env.sh may leave if interrupted
+/.env
+/.env.*
+!/.env.example
 *.xcuserstate
 ThirdParty/build/
 /Artifacts/

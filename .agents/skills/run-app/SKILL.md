@@ -42,12 +42,22 @@ to confirm.
 that check a failed build leaves the old app on the device and the launch looks like a success.
 
 ```
-MARIONETTE_DEVELOPMENT_TEAM=<team id> MARIONETTE_PROVISIONING_PROFILE=<profile uuid> \
-    .agents/skills/run-app/scripts/install-on-device.sh <device udid> [launch arguments…]
+.agents/skills/run-app/scripts/install-on-device.sh [device udid] [launch arguments…]
 ```
 
-- Ask the person for the team and the profile; do not guess them from the keychain, and keep them
-  and the device identifier out of files, commits and reports.
+- The device and the development profile come from `.env`. Run
+  `Scripts/env.sh check MARIONETTE_DEVELOPMENT_PROFILE MARIONETTE_DEVICE` first.
+- If the profile is missing, ask the person for the path to their development profile; do not pick
+  one from the keychain or Xcode's folder yourself. Save it with
+  `Scripts/env.sh set MARIONETTE_DEVELOPMENT_PROFILE <path>` once they agree, or when they ask you to
+  remember it. Do the same when they say it has been renewed or replaced.
+- If the device is missing, or the person names another one, save it with
+  `Scripts/env.sh set MARIONETTE_DEVICE --connected [model]`, which keeps the identifier out of the
+  conversation. Keep the team, the profile and the device identifier out of files, commits and
+  reports.
+- To try the build that GitHub Actions made rather than a local one, download the run's
+  `Marionette.xcarchive` artifact (`gh run download <run id> -n Marionette.xcarchive -D <folder>`)
+  and run `Scripts/sign-archive.sh device <folder>/Marionette.xcarchive.zip`.
 - Signing needs a profile that covers the bundle identifier and that device. If none does, that is
   for the person to fix in their developer account.
 - A locked device refuses the launch. The install has still happened: ask the person to open the app.

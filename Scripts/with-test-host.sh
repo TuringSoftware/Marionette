@@ -15,6 +15,9 @@
 #
 #   Scripts/with-test-host.sh [--profile NAME] <command> [arguments…]
 #
+# Without --profile, the profile is MARIONETTE_TEST_HOST_PROFILE from .env (see Scripts/env.sh), or
+# "default".
+#
 # For example:
 #   Scripts/with-test-host.sh --profile studio Scripts/test.sh --live
 #   Scripts/with-test-host.sh --profile studio Scripts/live-app-checks.sh <simulator udid>
@@ -24,7 +27,8 @@ set -euo pipefail
 
 here="${0:A:h}"
 service="Marionette live test host"
-profile=default
+for setting in ${(0)"$("$here/env.sh" load)"}; do export "$setting"; done
+profile="${MARIONETTE_TEST_HOST_PROFILE:-default}"
 if [[ "${1:-}" == --profile ]]; then
     profile="${2:?a profile name}"
     shift 2

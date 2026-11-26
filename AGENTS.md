@@ -26,6 +26,11 @@ you start.
 - `live-testing`: anything that connects to a real Mac or VNC server.
 - `protocol-research`: finding out what a Mac does, and turning it into code and documentation.
 - `ui-review`: any change to a screen, control, gesture or user-visible text.
+- `release`: setting the version, and uploading the CI build of it to App Store Connect.
+
+Settings that belong to one person's set-up (profiles, the device, API keys, the test-host profile)
+are in the git-ignored `.env`; skills read and save them with `Scripts/env.sh`, which prints no
+values.
 
 A skill is a procedure; guidance that people need too lives in `Docs/` and the skill links to it. A
 helper only one skill uses lives in that skill's folder; `Scripts/` and `Tools/` hold what people

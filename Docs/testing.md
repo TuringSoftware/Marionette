@@ -3,6 +3,28 @@
 Run `Scripts/bootstrap.sh` once before anything below. In the commands, replace each `<…>` with a
 value; `xcrun simctl list devices available` lists the simulators and their identifiers.
 
+## Local settings
+
+Scripts read the settings that belong to one person's set-up from `.env` at the root of the clone,
+which git ignores. `.env.example` lists the keys; a variable set in the environment wins over the file.
+
+| Key | What it is | Used by |
+|---|---|---|
+| `MARIONETTE_DEVELOPMENT_PROFILE` | path to a development profile that covers `llc.turing.Marionette` and the device | building for a device, `Scripts/sign-archive.sh device` |
+| `MARIONETTE_DEVICE` | the device's UDID | the same |
+| `MARIONETTE_DISTRIBUTION_PROFILE` | path to an App Store profile for `llc.turing.Marionette` | `Scripts/sign-archive.sh upload` |
+| `MARIONETTE_ASC_KEY`, `MARIONETTE_ASC_ISSUER` | path to an App Store Connect API key (`AuthKey_<key id>.p8`) and its issuer ID; `MARIONETTE_ASC_KEY_ID` when the file name does not give the key ID | the same |
+| `MARIONETTE_TEST_HOST_PROFILE` | the keychain profile `Scripts/with-test-host.sh` uses without `--profile` | live tests |
+
+```
+Scripts/env.sh set MARIONETTE_DEVELOPMENT_PROFILE ~/Downloads/Marionette_Development.mobileprovision
+Scripts/env.sh set MARIONETTE_DEVICE --connected [model]    # the iPhone or iPad that is connected
+Scripts/env.sh check MARIONETTE_DEVELOPMENT_PROFILE MARIONETTE_DEVICE
+```
+
+`Scripts/env.sh` prints no values, so it can be run where its output is shared. A profile's team and
+UUID are read from the profile itself.
+
 ## Unit tests
 
 ```
@@ -54,8 +76,14 @@ strips: `TEST_RUNNER_MARIONETTE_TEST_HOST=… xcodebuild test …`. The scripts 
 
 ## On a device
 
-Run the Marionette scheme from Xcode, or from a terminal with a development profile that covers the
-bundle identifier and the device:
+Run the Marionette scheme from Xcode, or, with the device and a development profile in
+[local settings](#local-settings), build, install and launch from a terminal:
+
+```
+.agents/skills/run-app/scripts/install-on-device.sh [device udid] [launch arguments…]
+```
+
+or by hand:
 
 ```
 xcodebuild build -project Marionette.xcodeproj -scheme Marionette -destination 'id=<device udid>' \
@@ -171,3 +199,29 @@ step, including file drags, gestures and raw messages, is listed above `runInput
 - Check what the Mac received on the Mac (`pbpaste`, files on disk, typed text), not in the client.
 - A wrong account and a wrong password look alike, and so does an account that may not use Screen
   Sharing.
+
+## Continuous integration and releases
+
+`.github/workflows/build.yml` runs on every push. One job builds an unsigned archive of the Release
+configuration and keeps it as the run's `Marionette.xcarchive` artifact (a zip) for 30 days; the
+other runs `Scripts/test.sh`. Caches are saved from `main` only: OpenSSL, keyed on its submodule
+commit and the Xcode version, and Xcode's compilation cache for the archive, which is keyed on
+content and so carries over to a fresh checkout.
+
+`Scripts/sign-archive.sh` signs such an archive, or the zip of one, with the settings above:
+
+```
+gh run download <run id> -n Marionette.xcarchive -D <folder>
+Scripts/sign-archive.sh device <folder>/Marionette.xcarchive.zip     # installs and launches on MARIONETTE_DEVICE
+Scripts/sign-archive.sh upload <folder>/Marionette.xcarchive.zip     # uploads to App Store Connect
+Scripts/sign-archive.sh check device|upload                          # checks the settings only
+```
+
+Options (`--profile`, `--device`, `--key`, `--issuer`, `--key-id`) override `.env`. The Apple
+Development or Apple Distribution certificate for the profile's team must be in the login keychain.
+The script refuses a profile that has expired, is for another app or is of the wrong kind, and checks
+the signed app's entitlements before installing or uploading it.
+
+To release, an agent follows the [`release` skill](../.agents/skills/release/SKILL.md): it raises the
+build number in `project.yml` (`.agents/skills/release/scripts/set-version.sh [version] [build]`),
+pushes the change to `main`, waits for the run to pass and uploads its archive.

@@ -1,0 +1,148 @@
+# Copyright © 2026 Turing Software, LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Builds an unsigned archive of the app and runs the packages' tests on every push. The archive is
+# uploaded as the artifact "Marionette.xcarchive" (a zip, which keeps the bundle's symlinks);
+# Scripts/sign-archive.sh signs it for a device or for App Store Connect.
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+# A run on main may be the build being released, so each gets a group of its own and is never
+# cancelled, even while waiting; on other branches a push cancels the branch's older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  # Caches are saved from main only; other branches start from main's, and cannot evict them.
+  SAVE_CACHES: ${{ github.ref == 'refs/heads/main' }}
+
+jobs:
+  archive:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Select Xcode
+        id: xcode
+        run: |
+          # The newest Xcode 27.1 or later on the image.
+          xcode="$(ls -d /Applications/Xcode_27.*.app 2>/dev/null | grep -vE '_27\.0[._]' | grep -v beta | sort -V | tail -1 || true)"
+          [[ -n "$xcode" ]] || { echo "::error::The image has no Xcode 27.1 or later."; ls -d /Applications/Xcode*.app; exit 1; }
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          echo "version=$(xcodebuild -version | tr -s ' \n' '--' | sed 's/-$//')" >> "$GITHUB_OUTPUT"
+          echo "openssl=$(git rev-parse HEAD:ThirdParty/openssl)" >> "$GITHUB_OUTPUT"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Restore OpenSSL
+        id: openssl
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            Packages/COpenSSL/OpenSSL.xcframework
+            Packages/COpenSSL/OpenSSL.stamp
+          key: openssl-${{ steps.xcode.outputs.openssl }}-${{ hashFiles('Scripts/build-deps.sh') }}-${{ steps.xcode.outputs.version }}
+
+      - name: Build OpenSSL
+        run: Scripts/build-deps.sh
+
+      - name: Save OpenSSL
+        if: env.SAVE_CACHES == 'true' && steps.openssl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            Packages/COpenSSL/OpenSSL.xcframework
+            Packages/COpenSSL/OpenSSL.stamp
+          key: ${{ steps.openssl.outputs.cache-primary-key }}
+
+      - name: Restore the compilation cache
+        id: cas
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/compilation-cache
+          key: cas-archive-${{ steps.xcode.outputs.version }}-${{ github.sha }}
+          restore-keys: cas-archive-${{ steps.xcode.outputs.version }}-
+
+      - name: Archive
+        run: |
+          xcodegen generate --quiet
+          # Each run adds to the cache and nothing removes stale entries, so start afresh past 2 GB.
+          cas="$RUNNER_TEMP/compilation-cache"
+          if [[ -d "$cas" && "$(du -sm "$cas" | cut -f1)" -gt 2048 ]]; then rm -rf "$cas"; fi
+          # Compilation caching is keyed on content, so it hits on a fresh checkout where DerivedData would not.
+          xcodebuild archive -project Marionette.xcodeproj -scheme Marionette -configuration Release \
+              -destination generic/platform=iOS -archivePath build/Marionette.xcarchive -derivedDataPath DerivedData \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              COMPILATION_CACHE_ENABLE_CACHING=YES COMPILATION_CACHE_CAS_PATH="$cas" \
+              -quiet
+          ditto -c -k --keepParent build/Marionette.xcarchive build/Marionette.xcarchive.zip
+          plist=build/Marionette.xcarchive/Info.plist
+          echo "Marionette $(plutil -extract ApplicationProperties.CFBundleShortVersionString raw "$plist") ($(plutil -extract ApplicationProperties.CFBundleVersion raw "$plist")), unsigned" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save the compilation cache
+        if: env.SAVE_CACHES == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/compilation-cache
+          key: ${{ steps.cas.outputs.cache-primary-key }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Marionette.xcarchive
+          path: build/Marionette.xcarchive.zip
+          retention-days: 30
+          # Already compressed.
+          compression-level: 0
+
+  test:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      - name: Select Xcode
+        id: xcode
+        run: |
+          xcode="$(ls -d /Applications/Xcode_27.*.app 2>/dev/null | grep -vE '_27\.0[._]' | grep -v beta | sort -V | tail -1 || true)"
+          [[ -n "$xcode" ]] || { echo "::error::The image has no Xcode 27.1 or later."; ls -d /Applications/Xcode*.app; exit 1; }
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          echo "version=$(xcodebuild -version | tr -s ' \n' '--' | sed 's/-$//')" >> "$GITHUB_OUTPUT"
+          echo "openssl=$(git rev-parse HEAD:ThirdParty/openssl)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore OpenSSL
+        id: openssl
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            Packages/COpenSSL/OpenSSL.xcframework
+            Packages/COpenSSL/OpenSSL.stamp
+          key: openssl-${{ steps.xcode.outputs.openssl }}-${{ hashFiles('Scripts/build-deps.sh') }}-${{ steps.xcode.outputs.version }}
+
+      - name: Build OpenSSL
+        run: Scripts/build-deps.sh
+
+      - name: Save OpenSSL
+        if: env.SAVE_CACHES == 'true' && steps.openssl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            Packages/COpenSSL/OpenSSL.xcframework
+            Packages/COpenSSL/OpenSSL.stamp
+          key: ${{ steps.openssl.outputs.cache-primary-key }}
+
+      - name: Test
+        run: Scripts/test.sh
