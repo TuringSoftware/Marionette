@@ -59,20 +59,40 @@ themselves unless their environment variables are set.
 `xcodebuild` passes a variable to the tests only when its name starts with `TEST_RUNNER_`, which it
 strips: `TEST_RUNNER_MARIONETTE_TEST_HOST=… xcodebuild test …`. The scripts do this.
 
+### The iPhone Duo simulator
+
+The simulator boots closed, showing its outer display. DeviceHub
+(`Xcode.app/Contents/Applications/DeviceHub.app`) opens and turns it with the buttons under the
+device: rotate, then closed, half open and open. `simctl` has no command for either. This is the
+iOS 27.2 simulator; the iOS 27.1 one has not been tried.
+
+- `xcrun simctl io <simulator udid> screenshot --display=primary-1 <file>` captures the inner
+  display once the device is open: 2853 × 2007 pixels on its side, 2007 × 2853 upright.
+  `--display=primary` is the outer display, 1398 × 2034.
+- The simulator ignores `XCUIDevice.shared.orientation`, open or closed. Turn it with DeviceHub's
+  rotate button before the test runs.
+- Half open and upright is the laptop pose: the system reports the fold, and a session docks, the
+  picture above the fold and the input deck below. No launch argument is involved.
+- In that pose XCUITest's touches miss the controls they are aimed at. A click in DeviceHub's
+  picture of the device is a touch, and lands where it is made.
+- DeviceHub takes clicks only while this Mac's screen is unlocked, and offers System Events no
+  elements to find its buttons by: a script has to click positions. Keep the display awake
+  (`caffeinate -d`) for as long as a run needs DeviceHub.
+
 ### What simulators cannot do
 
-- The iPhone Duo simulator boots closed and cannot be opened from the command line, so only its
-  outer display can be captured. `-MarionetteFoldOverride` lays the session out as the app expects
-  the system to when the device is partly open; these screenshots say "Simulated fold" on screen and
-  in their file names.
+- The iPhone Duo simulator cannot be opened or turned from the command line, so
+  `Scripts/screenshots.sh` captures only its outer display. `-MarionetteFoldOverride` lays the
+  session out as the app expects the system to when the device is partly open; these screenshots
+  say "Simulated fold" on screen and in their file names.
 - Hardware key presses from XCUITest never arrive on the iPhone Duo simulator, so the tests that
   press keys fail there. Run the suite on other simulators and only Duo-specific tests on the Duo.
 - The iOS 27.0 iPad simulator crashes while tiling windows; `testDroppingFromTheFilesAppOntoTheMac`
   runs on an iOS 26 iPad.
 - Simulators share this Mac's network ports, so only one of them, or `marionettectl`, can hold a
   High Performance session at a time. The others get Standard.
-- The hinge and both Duo displays, a real external monitor, HDR, a hardware keyboard on a Duo and
-  hardware HEVC 4:4:4 decoding need a device.
+- A hinge at an angle DeviceHub's poses do not offer, a real external monitor, HDR, a hardware
+  keyboard on a Duo and hardware HEVC 4:4:4 decoding need a device.
 
 ## On a device
 
