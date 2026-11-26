@@ -21,8 +21,12 @@ public struct VNCConfiguration: Sendable {
     public var encodings = "tight zrle ultra copyrect hextile zlib corre rre raw"
     /// 0 (fast) to 9 (small), for the encodings that compress.
     public var compressionLevel = 6
-    /// 0 (small) to 9 (faithful), for Tight's JPEG.
-    public var qualityLevel = 8
+    /// How faithfully the server is asked to send the desktop; ``VNCQuality/automatic`` follows the
+    /// measured throughput of the link.
+    public var quality = VNCQuality.automatic
+    /// Where the throughput estimate behind ``VNCQuality/automatic`` starts, in bits per second.
+    /// For tests.
+    package var initialBitsPerSecond = VNCThroughputEstimate.initialBitsPerSecond
 
     public init() {}
 }
@@ -129,6 +133,8 @@ public struct VNCFramebuffer: @unchecked Sendable {
     public let pixels: UnsafeRawBufferPointer
     public let width: Int
     public let height: Int
+    /// Handed over again by ``VNCClient/republish()``, rather than just changed by the server.
+    public var isRepublished = false
     public var bytesPerRow: Int { width * 4 }
 }
 
@@ -155,13 +161,15 @@ public final class VNCClient: @unchecked Sendable {
         case pointer(Int, Int, Int)
         case clipboard(String)
         case fullUpdate
+        case republish
+        case quality(VNCQuality)
         case stop
 
         /// Input goes out as soon as the client thread can write, even in the middle of an update.
         var isInput: Bool {
             switch self {
             case .key, .pointer: true
-            case .clipboard, .fullUpdate, .stop: false
+            case .clipboard, .fullUpdate, .republish, .quality, .stop: false
             }
         }
     }
@@ -177,17 +185,31 @@ public final class VNCClient: @unchecked Sendable {
     /// Why the transport stopped, as the bridge saw it.
     private var transportFailure: String?
     private var serverClosed = false
+    /// Bytes handed to the library from the server so far, for the throughput estimate.
+    private let receivedBytes = Atomic<Int>(0)
+    /// How many times the app has been about to be suspended (see ``willSuspend()``).
+    private let suspensions = Atomic<Int>(0)
 
     // Client thread only.
     private var handle: OpaquePointer?
     private var framebuffer: UnsafeMutableRawBufferPointer?
     private var framebufferSize = (width: 0, height: 0)
     private var changed: [VNCRect] = []
+    private var quality: VNCQuality
+    private var throughput: VNCThroughputEstimate
+    /// What the server was last asked for.
+    private var settings: VNCAdaptiveSettings
+    /// When the update under way began, how far the library had read by then, how many bytes had
+    /// arrived, and the count of suspensions.
+    private var updateStart: (time: ContinuousClock.Instant, bytes: Int, arrived: Int, suspensions: Int)?
 
     public init(transport: any VNCTransport, configuration: VNCConfiguration = VNCConfiguration(), handlers: VNCHandlers) {
         self.transport = transport
         self.configuration = configuration
         self.handlers = handlers
+        quality = configuration.quality
+        throughput = VNCThroughputEstimate(bitsPerSecond: configuration.initialBitsPerSecond)
+        settings = Self.settings(for: configuration.quality, throughput: throughput)
     }
 
     // MARK: Connecting
@@ -266,13 +288,17 @@ public final class VNCClient: @unchecked Sendable {
                     writeQueue.async {
                         var offset = 0
                         while offset < data.count {
-                            let sent = data.withUnsafeBytes { Darwin.send(bridge, $0.baseAddress! + offset, data.count - offset, 0) }
+                            // In slices, so that the count lags what is in the socket by at most one
+                            // (see `consumedBytes`).
+                            let slice = min(data.count - offset, Self.bridgeSlice)
+                            let sent = data.withUnsafeBytes { Darwin.send(bridge, $0.baseAddress! + offset, slice, 0) }
                             if sent <= 0 {
                                 if sent < 0, errno == EINTR { continue }
                                 continuation.resume(returning: false)
                                 return
                             }
                             offset += sent
+                            self.receivedBytes.add(sent, ordering: .relaxed)
                         }
                         continuation.resume(returning: true)
                     }
@@ -324,6 +350,13 @@ public final class VNCClient: @unchecked Sendable {
         callbacks.context = Unmanaged.passUnretained(self).toOpaque()
         callbacks.resize = { context, width, height in
             VNCClient.from(context).resize(width: Int(width), height: Int(height))
+        }
+        callbacks.started = { context in
+            let client = VNCClient.from(context)
+            client.updateStart = (
+                ContinuousClock.now, client.consumedBytes(), client.receivedBytes.load(ordering: .relaxed),
+                client.suspensions.load(ordering: .relaxed)
+            )
         }
         callbacks.update = { context, x, y, width, height in
             let client = VNCClient.from(context)
@@ -380,7 +413,8 @@ public final class VNCClient: @unchecked Sendable {
             connected.resume(throwing: VNCError.connectionFailed(String(localized: "LibVNCClient could not create a client", bundle: #bundle)))
             return
         }
-        marionette_vnc_set_encodings(client, configuration.encodings, Int32(configuration.compressionLevel), Int32(configuration.qualityLevel))
+        marionette_vnc_set_encodings(client, configuration.encodings, Int32(configuration.compressionLevel), Int32(settings.jpegQuality ?? -1))
+        _ = marionette_vnc_set_full_colour(client, settings.isFullColour ? 1 : 0, 0)
         guard marionette_vnc_connect(client, librarySocket, configuration.sharesDesktop ? 1 : 0) != 0 else {
             // The library destroyed the client on its way out.
             releaseFramebuffer()
@@ -392,11 +426,17 @@ public final class VNCClient: @unchecked Sendable {
         var major: Int32 = 0
         var minor: Int32 = 0
         marionette_vnc_server_version(&major, &minor)
-        connected.resume(returning: VNCServerInfo(
+        let info = VNCServerInfo(
             name: String(cString: marionette_vnc_desktop_name(client)),
             width: Int(marionette_vnc_width(client)), height: Int(marionette_vnc_height(client)),
             majorVersion: Int(major), minorVersion: Int(minor)
-        ))
+        )
+        // A Mac's server takes only 16 or 32 bits a pixel, and ends the session when asked for 8
+        // ("Only 16 or 32 bit pixels supported", macOS 27).
+        if info.isAppleScreenSharing { marionette_vnc_keep_full_colour(client) }
+        // So does a server older than RFB 3.8, whatever was asked.
+        if marionette_vnc_can_change_colour(client) == 0 { settings.isFullColour = true }
+        connected.resume(returning: info)
 
         var requested = false
         loop: while true {
@@ -454,9 +494,69 @@ public final class VNCClient: @unchecked Sendable {
             }
         case .fullUpdate:
             _ = marionette_vnc_request_update(client, 0, 0, marionette_vnc_width(client), marionette_vnc_height(client), 0)
+        case .republish:
+            guard let framebuffer, framebufferSize != (0, 0), announcedSize == framebufferSize else { return }
+            handlers.updated(
+                VNCFramebuffer(pixels: UnsafeRawBufferPointer(framebuffer), width: framebufferSize.width, height: framebufferSize.height, isRepublished: true),
+                [VNCRect(x: 0, y: 0, width: framebufferSize.width, height: framebufferSize.height)]
+            )
+        case .quality(let quality):
+            self.quality = quality
+            applySettings(on: client)
         case .stop:
             break
         }
+    }
+
+    private static func settings(for quality: VNCQuality, throughput: VNCThroughputEstimate, isFullColour: Bool = true) -> VNCAdaptiveSettings {
+        switch quality {
+        case .automatic: .automatic(bitsPerSecond: throughput.bitsPerSecond, isFullColour: isFullColour)
+        case .lossless: .lossless
+        }
+    }
+
+    /// Asks the server for what the quality and the throughput now call for, if it differs.
+    private func applySettings(on client: OpaquePointer) {
+        var wanted = Self.settings(for: quality, throughput: throughput, isFullColour: settings.isFullColour)
+        // Lossless asks for exact pixels, so what came in 256 colours comes again; following the
+        // link does not, or every rise past the threshold would cost a whole desktop.
+        if wanted.isFullColour != settings.isFullColour,
+           marionette_vnc_set_full_colour(client, wanted.isFullColour ? 1 : 0, quality == .lossless ? 1 : 0) == 0 {
+            wanted.isFullColour = settings.isFullColour
+        }
+        guard wanted != settings else { return }
+        qualityLog.info("\(self.throughput.bitsPerSecond / 1000) kbit/s: JPEG quality \(wanted.jpegQuality.map(String.init) ?? "none", privacy: .public), \(wanted.isFullColour ? "full colour" : "256 colours", privacy: .public)")
+        if wanted.jpegQuality != settings.jpegQuality {
+            _ = marionette_vnc_set_quality(client, Int32(wanted.jpegQuality ?? -1))
+        }
+        settings = wanted
+    }
+
+    /// Size of the pieces the bridge hands to the library's socket.
+    private static let bridgeSlice = 4096
+
+    /// How far into the server's stream the library has read. Bytes arrive ahead of being read, in
+    /// the socket and in LibVNCClient's buffer; a small update often lies there whole before its
+    /// header is read, and counting arrivals would make it look empty. A slice the bridge is handing
+    /// over at the time can put the position out by at most that slice.
+    private func consumedBytes() -> Int {
+        guard let handle else { return receivedBytes.load(ordering: .relaxed) }
+        let unread = Int(marionette_vnc_unread_bytes(handle))
+        return receivedBytes.load(ordering: .relaxed) - unread
+    }
+
+    /// Folds the update that just ended into the throughput estimate.
+    private func measureUpdate() {
+        guard let start = updateStart else { return }
+        updateStart = nil
+        // An update that was here whole before its header was read crossed the network earlier,
+        // while the client was busy with another; its time says nothing about the link. Counted, a
+        // run of them takes a few milliseconds and lifts the estimate by about 8 bit/s per byte:
+        // on a 200 kbit/s link, from about 250 to over 320 kbit/s in a second.
+        guard receivedBytes.load(ordering: .relaxed) != start.arrived else { return }
+        // Time the app spent suspended is not time the link took.
+        guard suspensions.load(ordering: .relaxed) == start.suspensions else { return }
+        throughput.add(bytes: consumedBytes() - start.bytes, elapsed: ContinuousClock.now - start.time)
     }
 
     /// Sends the input at the front of the queue, from inside an update. Other commands wait for
@@ -553,6 +653,8 @@ public final class VNCClient: @unchecked Sendable {
     private var announcedSize = (width: 0, height: 0)
 
     private func finishUpdate() {
+        measureUpdate()
+        if let handle { applySettings(on: handle) }
         guard let framebuffer, framebufferSize != (0, 0) else { return }
         if announcedSize != framebufferSize {
             announcedSize = framebufferSize
@@ -598,9 +700,29 @@ public final class VNCClient: @unchecked Sendable {
         enqueue(.clipboard(text))
     }
 
-    /// Asks the server to send the whole desktop again.
+    /// Asks the server to send the whole desktop again, at once, whether or not it has changed.
+    /// The colour depth then stays as it is for the rest of the session: the server may answer
+    /// with one update or two, and an update in flight across a change of depth would be misread.
     public func requestFullUpdate() {
         enqueue(.fullUpdate)
+    }
+
+    /// Hands the desktop as the client has it to `updated` again, all of it, without asking the
+    /// server.
+    public func republish() {
+        enqueue(.republish)
+    }
+
+    /// The app is about to be suspended: the update under way, if any, does not count towards the
+    /// throughput estimate, since it will seem to take as long as the app is away. Any thread.
+    public func willSuspend() {
+        suspensions.add(1, ordering: .relaxed)
+    }
+
+    /// Changes how faithfully the server is asked to send the desktop. JPEG quality changes at once;
+    /// a colour depth change waits for the end of the next update.
+    public func setQuality(_ quality: VNCQuality) {
+        enqueue(.quality(quality))
     }
 
     /// Ends the session. The `disconnected` handler follows.

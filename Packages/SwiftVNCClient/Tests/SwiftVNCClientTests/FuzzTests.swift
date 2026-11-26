@@ -126,8 +126,10 @@ private struct Seeded: RandomNumberGenerator {
 /// (`swift test --sanitize=address --filter VNCFuzzTests`) to turn a quiet overrun into a failure.
 @Suite(.serialized) struct VNCFuzzTests {
     /// One connection: the handshake, the first picture, then `payload` as the server's next
-    /// messages, then a hang-up. The client must end, and end without crashing.
-    private func run(_ payload: Data) async throws {
+    /// messages, then a hang-up. The client must end, and end without crashing. With `lowColour`
+    /// the client asks for 256 colours from the first picture on, so the payload is decoded, and
+    /// converted, as 8-bit pixels.
+    private func run(_ payload: Data, lowColour: Bool = false) async throws {
         let (clientEnd, serverEnd) = PipeEnd.pair()
         let server = ScriptedServer(end: serverEnd)
         let serving = Task { try? await server.run() }
@@ -136,7 +138,9 @@ private struct Seeded: RandomNumberGenerator {
         var handlers = VNCHandlers()
         handlers.updated = { _, _ in updated.withLock { $0 = true } }
         handlers.disconnected = { _ in ended.withLock { $0 = true } }
-        let client = VNCClient(transport: clientEnd, configuration: VNCConfiguration(), handlers: handlers)
+        var configuration = VNCConfiguration()
+        if lowColour { configuration.initialBitsPerSecond = 1_000 }
+        let client = VNCClient(transport: clientEnd, configuration: configuration, handlers: handlers)
         _ = try await client.connect()
         let start = ContinuousClock.now
         while !updated.withLock({ $0 }), ContinuousClock.now - start < .seconds(3) { try await Task.sleep(for: .milliseconds(2)) }
@@ -165,6 +169,19 @@ private struct Seeded: RandomNumberGenerator {
                 payload.append(damage(Messages.all.randomElement(using: &generator)!, &generator))
             }
             try await run(payload)
+        }
+    }
+
+    @Test(arguments: 0..<2)
+    func damagedMessagesNeverCrashTheClientIn256Colours(batch: Int) async throws {
+        var generator = Seeded(state: UInt64(2000 + batch))
+        try await run(Messages.all.reduce(Data(), +), lowColour: true)
+        for _ in 0..<60 {
+            var payload = Data()
+            for _ in 0..<Int.random(in: 1...4, using: &generator) {
+                payload.append(damage(Messages.all.randomElement(using: &generator)!, &generator))
+            }
+            try await run(payload, lowColour: true)
         }
     }
 

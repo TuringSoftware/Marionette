@@ -17,7 +17,8 @@ mode, and works with any VNC server as a fallback.
     displays.
   - *Standard*: Full or Adaptive quality, any of the Mac's physical displays, and curtain mode.
   - Asking the signed-in user for permission, or opening a session of one's own.
-- **Any VNC server**, through LibVNCClient.
+- **Any VNC server**, through LibVNCClient, at Full quality or Adaptive, which lowers JPEG quality and
+  then colours as the network slows.
 - **SSH.** Tunnels a session over SSH, and browses, uploads and downloads the computer's files over SFTP,
   with Ed25519, ECDSA, RSA and Secure Enclave keys, and known hosts. Passwords and keys can require
   Face ID or Touch ID and be kept out of backups; keys can also go to iCloud Keychain.

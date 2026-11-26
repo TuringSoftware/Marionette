@@ -820,6 +820,8 @@ A viewer that answers the Mac's `003.889` with `003.008` (LibVNCClient does) get
 - Input in the first two seconds after the login is dropped, as on Apple's protocol.
 - A held key does not repeat; characters beyond U+FFFF need surrogates (see [Keys](#keys)).
 - Copying text on the Mac sent no ServerCutText within a few seconds.
+- `SetPixelFormat` takes 16 or 32 bits a pixel only. Asked for 8 (true colour, 3/3/2 bits) the Mac
+  logs "Only 16 or 32 bit pixels supported" and closes the connection (macOS 27; Mac log).
 
 ## Open questions
 

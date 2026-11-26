@@ -17,6 +17,7 @@ private final class Observed: Sendable {
         var updates: [[VNCRect]] = []
         var pixels: [UInt8] = []
         var bells = 0
+        var cursors: [VNCCursor] = []
         var clipboard: [String] = []
         var disconnects: [VNCDisconnectReason] = []
         var credentialRequests: [VNCCredentialKind] = []
@@ -44,6 +45,10 @@ private final class Observed: Sendable {
         }
         handlers.bell = { [self] in
             state.withLock { $0.bells += 1 }
+            signal.continuation.yield()
+        }
+        handlers.cursor = { [self] cursor in
+            state.withLock { $0.cursors.append(cursor) }
             signal.continuation.yield()
         }
         handlers.clipboard = { [self] text in
@@ -434,6 +439,169 @@ private final class Observed: Sendable {
             if !settled { try await Task.sleep(for: .milliseconds(100)) }
         }
         #expect(settled, "\(openDescriptorCount() - before) more descriptors open than before")
+    }
+
+    // MARK: Quality
+
+    /// The JPEG quality pseudo-encodings, -32 (quality 0) to -23 (quality 9).
+    private static func qualities(in encodings: [Int32]) -> [Int32] {
+        encodings.filter { (-32)...(-23) ~= $0 }.map { $0 + 32 }
+    }
+
+    @Test func aFullQualitySessionAsksForNoJPEG() async throws {
+        var configuration = VNCConfiguration()
+        configuration.quality = .lossless
+        let (client, server, observed, _) = start(configuration: configuration)
+        _ = try await client.connect()
+        await observed.wait("the first update") { !$0.updates.isEmpty }
+        let recorded = server.recorded.withLock { $0 }
+        #expect(Self.qualities(in: recorded.encodings).isEmpty)
+        #expect(recorded.encodings.first == 7, "Tight is still asked for first, losslessly")
+        #expect(recorded.pixelFormats == [32])
+        client.disconnect()
+    }
+
+    @Test func choosingFullQualityDropsJPEGAtOnce() async throws {
+        let (client, server, observed, _) = start()
+        _ = try await client.connect()
+        await observed.wait("the first update") { !$0.updates.isEmpty }
+        #expect(Self.qualities(in: server.recorded.withLock { $0.encodings }) == [8])
+        // No update is needed for it to go out.
+        client.setQuality(.lossless)
+        await waitUntil("JPEG is no longer asked for") { Self.qualities(in: server.recorded.withLock { $0.encodings }).isEmpty }
+        client.setQuality(.automatic)
+        await waitUntil("JPEG is asked for again") { Self.qualities(in: server.recorded.withLock { $0.encodings }) == [8] }
+        #expect(server.recorded.withLock { $0.pixelFormats } == [32])
+        client.disconnect()
+    }
+
+    /// A slow link: quality 6 from the start, then 256 colours from the first update on, switched
+    /// while no request is outstanding, decoded into the same B, G, R, X framebuffer; then full
+    /// colour again, with the whole desktop asked for anew.
+    @Test func aSlowLinkGetsLowerQualityAnd256ColoursUntilFullIsChosen() async throws {
+        var configuration = VNCConfiguration()
+        // A quick update raises the estimate by about eight bit/s per byte it carries (its weight
+        // grows with its time as its rate falls), so the test's updates, about 13 kB in all, leave
+        // it far below 256 kbit/s.
+        configuration.initialBitsPerSecond = 1_000
+        let (client, server, observed, _) = start(configuration: configuration)
+        _ = try await client.connect()
+        await observed.wait("the first update") { !$0.updates.isEmpty }
+        #expect(Self.qualities(in: server.recorded.withLock { $0.encodingLists.first ?? [] }) == [6])
+        await waitUntil("256 colours are asked for") {
+            server.recorded.withLock { $0.pixelFormats.last == 8 && $0.updateRequests >= 2 }
+        }
+        // JPEG is not asked for in 256 colours: Tight has none there.
+        #expect(Self.qualities(in: server.recorded.withLock { $0.encodings }).isEmpty)
+
+        try await server.paint(x: 8, y: 4, width: 16, height: 8, generation: 100)
+        await observed.wait("the update in 256 colours") { $0.updates.count >= 2 }
+        var pixels = observed.state.withLock { $0.pixels }
+        let inside = (5 * 64 + 9) * 4
+        let outside = (5 * 64 + 40) * 4
+        #expect(Array(pixels[inside..<(inside + 3)]) == ScriptedServer.lowColourPixel(x: 9, y: 5, generation: 100))
+        #expect(Array(pixels[outside..<(outside + 3)]) == Array(ScriptedServer.pixel(x: 40, y: 5).prefix(3)), "what has not changed keeps its colours")
+
+        await waitUntil("the next request") { server.recorded.withLock { $0.updateRequests >= 3 } }
+        try await server.changeCursor(width: 4, height: 3)
+        await observed.wait("the cursor in 256 colours") { !$0.cursors.isEmpty }
+        let cursor = try #require(observed.state.withLock { $0.cursors.last })
+        #expect(cursor.width == 4 && cursor.height == 3 && cursor.hotspotX == 1 && cursor.hotspotY == 2)
+        #expect(Array(cursor.pixels.prefix(4)) == ScriptedServer.lowColourPixel(x: 1, y: 1) + [255])
+
+        client.setQuality(.lossless)
+        await waitUntil("the request after the cursor") { server.recorded.withLock { $0.updateRequests >= 4 } }
+        // The switch back waits for an update to start: this one still comes in 256 colours.
+        try await server.paint(x: 0, y: 0, width: 4, height: 4, generation: 200)
+        await waitUntil("full colour is asked for, then the whole desktop") {
+            server.recorded.withLock { $0.pixelFormats.last == 32 && $0.incrementalRequests.last == false }
+        }
+        pixels = observed.state.withLock { $0.pixels }
+        #expect(Array(pixels[0..<3]) == ScriptedServer.lowColourPixel(x: 0, y: 0, generation: 200))
+
+        let updatesBefore = observed.state.withLock { $0.updates.count }
+        try await server.paint(x: 0, y: 0, width: 4, height: 4, generation: 300)
+        await observed.wait("the update in full colour") { $0.updates.count > updatesBefore }
+        pixels = observed.state.withLock { $0.pixels }
+        #expect(Array(pixels[4..<8]) == ScriptedServer.pixel(x: 1, y: 0, generation: 300))
+        #expect(server.recorded.withLock { $0.pixelFormatsWithRequestOutstanding } == 0)
+        #expect(server.recorded.withLock { $0.requestsWhileOneWasOutstanding } == 0)
+        #expect(observed.state.withLock { $0.disconnects }.isEmpty)
+        client.disconnect()
+    }
+
+    /// A request beside the one outstanding may be answered with one update or two, so an update in
+    /// the old format could follow a change of depth: the depth stays as it is.
+    @Test func afterAnExtraRequestTheColourDepthStays() async throws {
+        var configuration = VNCConfiguration()
+        configuration.quality = .lossless
+        configuration.initialBitsPerSecond = 1_000
+        let (client, server, observed, _) = start(configuration: configuration)
+        _ = try await client.connect()
+        await observed.wait("the first update") { !$0.updates.isEmpty }
+        client.requestFullUpdate()
+        await waitUntil("the extra request") { server.recorded.withLock { $0.requestsWhileOneWasOutstanding == 1 } }
+        client.setQuality(.automatic)
+        await waitUntil("quality 6 is asked for") { Self.qualities(in: server.recorded.withLock { $0.encodings }) == [6] }
+        for generation in 1...3 {
+            try await server.paint(x: 0, y: 0, width: 4, height: 4, generation: generation)
+            await observed.wait("update \(generation)") { $0.updates.count > generation }
+        }
+        #expect(server.recorded.withLock { $0.pixelFormats } == [32])
+        #expect(Array(observed.state.withLock { $0.pixels }[0..<4]) == ScriptedServer.pixel(x: 0, y: 0, generation: 3))
+        client.disconnect()
+    }
+
+    /// A Mac's server ends the session when asked for 8 bits a pixel.
+    @Test func aMacsServerStaysInFullColourOnASlowLink() async throws {
+        var configuration = VNCConfiguration()
+        configuration.initialBitsPerSecond = 1_000
+        let (client, server, observed, _) = start(configuration: configuration, server: { ScriptedServer(end: $0, version: "RFB 003.889\n") })
+        _ = try await client.connect()
+        await observed.wait("the first update") { !$0.updates.isEmpty }
+        try await server.paint(x: 0, y: 0, width: 4, height: 4, generation: 1)
+        await observed.wait("the second update") { $0.updates.count >= 2 }
+        #expect(server.recorded.withLock { $0.pixelFormats } == [32])
+        #expect(Self.qualities(in: server.recorded.withLock { $0.encodings }) == [6])
+        client.disconnect()
+    }
+
+    /// LibVNCClient sets its own copy of the JPEG quality to 9 whenever a ZRLE rectangle arrives.
+    @Test func aZRLEPictureDoesNotChangeTheQualityAskedFor() async throws {
+        let (client, server, observed, _) = start(server: { ScriptedServer(end: $0, firstFrameInZRLE: true) })
+        _ = try await client.connect()
+        await observed.wait("the first update") { !$0.updates.isEmpty }
+        let offset = (20 * 64 + 10) * 4
+        let pixels = observed.state.withLock { $0.pixels }
+        try #require(pixels.count == 64 * 48 * 4)
+        #expect(Array(pixels[offset..<(offset + 3)]) == Array(ScriptedServer.pixel(x: 10, y: 20).prefix(3)))
+        // Without ExtendedDesktopSize the encodings go again after the first update.
+        await waitUntil("the encodings again") { server.recorded.withLock { $0.encodingLists.count >= 2 } }
+        #expect(Self.qualities(in: server.recorded.withLock { $0.encodings }) == [8])
+        client.disconnect()
+    }
+
+    @Test func republishingHandsOverTheDesktopWithoutAskingTheServer() async throws {
+        let (client, server, observed, _) = start()
+        _ = try await client.connect()
+        await observed.wait("the first update") { !$0.updates.isEmpty }
+        let requests = server.recorded.withLock { $0.updateRequests }
+        client.republish()
+        await observed.wait("the desktop again") { $0.updates.count == 2 }
+        #expect(observed.state.withLock { $0.updates.last } == [VNCRect(x: 0, y: 0, width: 64, height: 48)])
+        #expect(server.recorded.withLock { $0.updateRequests } == requests)
+        client.disconnect()
+    }
+
+    private func waitUntil(_ what: String, _ condition: () -> Bool) async {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                Issue.record("timed out waiting until \(what)")
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     private func openDescriptorCount() -> Int {

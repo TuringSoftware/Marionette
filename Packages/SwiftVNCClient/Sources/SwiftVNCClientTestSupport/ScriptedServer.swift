@@ -116,6 +116,15 @@ package final class ScriptedServer: Sendable {
         /// Every SetEncodings, in order.
         package var encodingLists: [[Int32]] = []
         package var updateRequests = 0
+        /// Whether each update request was incremental, in order.
+        package var incrementalRequests: [Bool] = []
+        /// The bits per pixel of every SetPixelFormat, in order.
+        package var pixelFormats: [Int] = []
+        /// SetPixelFormats that came while an update request was still unanswered: the server could
+        /// not know which format the client expects for its answer.
+        package var pixelFormatsWithRequestOutstanding = 0
+        /// Update requests that came while another was still unanswered.
+        package var requestsWhileOneWasOutstanding = 0
         package var shared: Bool?
         /// The flags of the client's extended-clipboard Caps, once it sent them.
         package var clientClipboardCaps: UInt32?
@@ -135,6 +144,8 @@ package final class ScriptedServer: Sendable {
 
     private enum Step: Sendable {
         case bytes(Data)
+        /// Raw pixels, in the format the client asked for when they are sent.
+        case update(x: Int, y: Int, width: Int, height: Int, generation: Int)
         case pause(Duration)
         /// Keep reading client messages until a key event arrives, or the time is up.
         case awaitKey(Duration, then: Data)
@@ -146,6 +157,17 @@ package final class ScriptedServer: Sendable {
         var height: Int
     }
 
+    /// What a real server tracks between requests and updates.
+    private struct Wire {
+        /// 32 (B, G, R, X) or 8 (three bits red, three green, two blue).
+        var bitsPerPixel = 32
+        /// An update request has come that no update has answered yet. Like real servers, one
+        /// update answers every request outstanding.
+        var requestOutstanding = false
+        /// Changes made while no request was outstanding, for the next one.
+        var painted: [Step] = []
+    }
+
     package let password: String?
     package let recorded = Mutex(Recorded())
     private let version: String
@@ -153,9 +175,11 @@ package final class ScriptedServer: Sendable {
     private let failureReason: String
     private let extendedDesktopSizeScreenID: UInt32?
     private let offersExtendedClipboard: Bool
+    private let firstFrameInZRLE: Bool
     private let end: PipeEnd
     private let steps: Mutex<[Step]>
     private let desktop: Mutex<Desktop>
+    private let wire = Mutex(Wire())
     private let serverClipboard = Mutex<String?>(nil)
 
     /// - Parameters:
@@ -164,10 +188,11 @@ package final class ScriptedServer: Sendable {
     ///   - extendedDesktopSizeScreenID: when set, the server answers ExtendedDesktopSize with one
     ///     screen of this id, as QEMU does with 0, and resizes with it while the client asks for it.
     ///   - extendedClipboard: whether the server speaks the extended clipboard.
+    ///   - firstFrameInZRLE: whether the first picture comes as ZRLE rather than Raw.
     package init(
         end: PipeEnd, width: Int = 64, height: Int = 48, password: String? = nil, version: String = "RFB 003.008\n",
         refusal: Refusal? = nil, failureReason: String = "Authentication failed", extendedDesktopSizeScreenID: UInt32? = nil,
-        extendedClipboard: Bool = false
+        extendedClipboard: Bool = false, firstFrameInZRLE: Bool = false
     ) {
         self.end = end
         self.password = password
@@ -176,6 +201,7 @@ package final class ScriptedServer: Sendable {
         self.failureReason = failureReason
         self.extendedDesktopSizeScreenID = extendedDesktopSizeScreenID
         offersExtendedClipboard = extendedClipboard
+        self.firstFrameInZRLE = firstFrameInZRLE
         steps = Mutex([])
         desktop = Mutex(Desktop(width: width, height: height))
     }
@@ -195,10 +221,31 @@ package final class ScriptedServer: Sendable {
         Data(u16(x) + u16(y) + u16(width) + u16(height) + u32(UInt32(bitPattern: encoding)))
     }
 
-    private static func rawRectangle(x: Int, y: Int, width: Int, height: Int, generation: Int) -> Data {
+    /// A pixel of ``pixel(x:y:generation:)`` in 256 colours: three bits of red and green, two of blue.
+    package static func lowColourValue(x: Int, y: Int, generation: Int = 0) -> UInt8 {
+        reduce(pixel(x: x, y: y, generation: generation))
+    }
+
+    private static func reduce(_ pixel: [UInt8]) -> UInt8 {
+        (pixel[2] & 0xe0) | ((pixel[1] >> 5) << 2) | (pixel[0] >> 6)
+    }
+
+    /// What a client shows for a pixel sent in 256 colours: B, G, R, each stretched back to 0–255.
+    package static func lowColourPixel(x: Int, y: Int, generation: Int = 0) -> [UInt8] {
+        let value = Int(lowColourValue(x: x, y: y, generation: generation))
+        return [UInt8((value & 3) * 255 / 3), UInt8(((value >> 2) & 7) * 255 / 7), UInt8(((value >> 5) & 7) * 255 / 7)]
+    }
+
+    private static func encode(_ pixel: [UInt8], bitsPerPixel: Int) -> [UInt8] {
+        bitsPerPixel == 8 ? [reduce(pixel)] : pixel
+    }
+
+    private static func rawRectangle(x: Int, y: Int, width: Int, height: Int, generation: Int, bitsPerPixel: Int = 32) -> Data {
         var data = rectangleHeader(x: x, y: y, width: width, height: height, encoding: 0)
         for row in y..<(y + height) {
-            for column in x..<(x + width) { data.append(contentsOf: pixel(x: column, y: row, generation: generation)) }
+            for column in x..<(x + width) {
+                data.append(contentsOf: encode(pixel(x: column, y: row, generation: generation), bitsPerPixel: bitsPerPixel))
+            }
         }
         return data
     }
@@ -208,7 +255,33 @@ package final class ScriptedServer: Sendable {
     }
 
     private func raw(x: Int, y: Int, width: Int, height: Int, generation: Int) -> Data {
-        Self.update([Self.rawRectangle(x: x, y: y, width: width, height: height, generation: generation)])
+        let bitsPerPixel = wire.withLock { $0.bitsPerPixel }
+        return Self.update([Self.rawRectangle(x: x, y: y, width: width, height: height, generation: generation, bitsPerPixel: bitsPerPixel)])
+    }
+
+    /// The whole desktop as one ZRLE rectangle of raw 64 × 64 tiles, in 32-bit pixels sent as three
+    /// bytes, B, G, R. ZRLE's zlib stream lasts the whole connection, and this one starts it, so it
+    /// is for the first update only.
+    private func zrle(width: Int, height: Int) -> Data {
+        var tiles = Data()
+        for top in stride(from: 0, to: height, by: 64) {
+            for left in stride(from: 0, to: width, by: 64) {
+                tiles.append(0)
+                for row in top..<min(top + 64, height) {
+                    for column in left..<min(left + 64, width) { tiles.append(contentsOf: Self.pixel(x: column, y: row).prefix(3)) }
+                }
+            }
+        }
+        let compressed = Self.deflateFlushed(tiles)
+        var rectangle = Self.rectangleHeader(x: 0, y: 0, width: width, height: height, encoding: 16)
+        rectangle.append(contentsOf: Self.u32(UInt32(compressed.count)) + compressed)
+        return Self.update([rectangle])
+    }
+
+    /// Writes a server message, noting whether it answers the outstanding requests.
+    private func write(_ bytes: Data) async throws {
+        if bytes.first == 0 { wire.withLock { $0.requestOutstanding = false } }
+        try await end.write(bytes)
     }
 
     /// Queues something for the server to send at its next opportunity (the next update request).
@@ -216,8 +289,43 @@ package final class ScriptedServer: Sendable {
         steps.withLock { $0.append(.bytes(bytes)) }
     }
 
+    /// Sends what is queued at once rather than with the next request, as a server with something
+    /// to say does.
+    package func sendQueued() async throws {
+        try await playSteps()
+    }
+
     package func sendUpdate(x: Int, y: Int, width: Int, height: Int, generation: Int) {
-        send(raw(x: x, y: y, width: width, height: height, generation: generation))
+        steps.withLock { $0.append(.update(x: x, y: y, width: width, height: height, generation: generation)) }
+    }
+
+    /// Changes part of the desktop as a real server sees it change: sent at once if the client has
+    /// a request outstanding, otherwise in answer to its next one.
+    package func paint(x: Int, y: Int, width: Int, height: Int, generation: Int) async throws {
+        try await deliver(.update(x: x, y: y, width: width, height: height, generation: generation))
+    }
+
+    /// A new cursor shape as a RichCursor rectangle, in the client's pixel format, delivered as
+    /// ``paint(x:y:width:height:generation:)`` is: `width` × `height` of the pixel at (1, 1), with
+    /// its hotspot at (1, 2).
+    package func changeCursor(width: Int, height: Int) async throws {
+        let bitsPerPixel = wire.withLock { $0.bitsPerPixel }
+        var rectangle = Self.rectangleHeader(x: 1, y: 2, width: width, height: height, encoding: -239)
+        for _ in 0..<(width * height) { rectangle.append(contentsOf: Self.encode(Self.pixel(x: 1, y: 1), bitsPerPixel: bitsPerPixel)) }
+        rectangle.append(Data(repeating: 0xff, count: (width + 7) / 8 * height))
+        try await deliver(.bytes(Self.update([rectangle])))
+    }
+
+    private func deliver(_ step: Step) async throws {
+        let now: Bool = wire.withLock { wire in
+            guard wire.requestOutstanding else {
+                wire.painted.append(step)
+                return false
+            }
+            wire.requestOutstanding = false
+            return true
+        }
+        if now { try await play([step]) }
     }
 
     package func sendBell() {
@@ -330,7 +438,7 @@ package final class ScriptedServer: Sendable {
             if try await handle(type) {
                 if !sentFirstFrame, width > 0, height > 0 {
                     sentFirstFrame = true
-                    try await end.write(raw(x: 0, y: 0, width: width, height: height, generation: 0))
+                    try await write(firstFrameInZRLE ? zrle(width: width, height: height) : raw(x: 0, y: 0, width: width, height: height, generation: 0))
                 }
                 try await playSteps()
             }
@@ -341,7 +449,17 @@ package final class ScriptedServer: Sendable {
     private func handle(_ type: UInt8) async throws -> Bool {
         switch type {
         case 0:
-            _ = try await end.readExactly(19)
+            let body = try await end.readExactly(19)
+            let bitsPerPixel = Int(body[3])
+            guard bitsPerPixel == 32 || bitsPerPixel == 8 else { throw ScriptError.unexpected("\(bitsPerPixel) bits per pixel") }
+            let outstanding = wire.withLock { wire in
+                wire.bitsPerPixel = bitsPerPixel
+                return wire.requestOutstanding
+            }
+            recorded.withLock { recorded in
+                recorded.pixelFormats.append(bitsPerPixel)
+                if outstanding { recorded.pixelFormatsWithRequestOutstanding += 1 }
+            }
         case 2:
             let header = try await end.readExactly(3)
             let count = Int(header[1]) << 8 | Int(header[2])
@@ -360,8 +478,16 @@ package final class ScriptedServer: Sendable {
                 try await end.write(Self.extendedClipboardMessage(Self.u32(flags) + Self.u32(1 << 20)))
             }
         case 3:
-            _ = try await end.readExactly(9)
-            recorded.withLock { $0.updateRequests += 1 }
+            let body = try await end.readExactly(9)
+            let wasOutstanding = wire.withLock { wire in
+                defer { wire.requestOutstanding = true }
+                return wire.requestOutstanding
+            }
+            recorded.withLock {
+                $0.updateRequests += 1
+                $0.incrementalRequests.append(body[0] != 0)
+                if wasOutstanding { $0.requestsWhileOneWasOutstanding += 1 }
+            }
             return true
         case 4:
             let body = try await end.readExactly(7)
@@ -421,10 +547,20 @@ package final class ScriptedServer: Sendable {
             defer { $0.removeAll() }
             return $0
         }
+        let painted: [Step] = wire.withLock {
+            defer { $0.painted.removeAll() }
+            return $0.painted
+        }
+        try await play(queued + painted)
+    }
+
+    private func play(_ queued: [Step]) async throws {
         for step in queued {
             switch step {
             case .bytes(let bytes):
-                try await end.write(bytes)
+                try await write(bytes)
+            case .update(let x, let y, let width, let height, let generation):
+                try await write(raw(x: x, y: y, width: width, height: height, generation: generation))
             case .pause(let duration):
                 try await Task.sleep(for: duration)
             case .awaitKey(let timeout, let then):
@@ -444,18 +580,18 @@ package final class ScriptedServer: Sendable {
                 }
                 let arrived = keyArrived()
                 recorded.withLock { $0.inputArrivedBetweenRectangles = arrived }
-                try await end.write(then)
+                try await write(then)
                 try await reader.value
             case .resize(let width, let height, let generation):
                 desktop.withLock { $0 = Desktop(width: width, height: height) }
                 let encodings = recorded.withLock { $0.encodings }
                 if let id = extendedDesktopSizeScreenID, encodings.contains(-308) {
-                    try await end.write(extendedDesktopSize(width: width, height: height, screenID: id))
+                    try await write(extendedDesktopSize(width: width, height: height, screenID: id))
                 } else {
                     guard encodings.contains(-223) else { throw ScriptError.unexpected("the client cannot be resized") }
-                    try await end.write(Self.update([Self.rectangleHeader(x: 0, y: 0, width: width, height: height, encoding: -223)]))
+                    try await write(Self.update([Self.rectangleHeader(x: 0, y: 0, width: width, height: height, encoding: -223)]))
                 }
-                try await end.write(raw(x: 0, y: 0, width: width, height: height, generation: generation))
+                try await write(raw(x: 0, y: 0, width: width, height: height, generation: generation))
             }
         }
     }
@@ -474,6 +610,27 @@ package final class ScriptedServer: Sendable {
         let bytes = [UInt8](data)
         _ = compress2(&output, &length, bytes, uLong(bytes.count), 6)
         return Array(output.prefix(Int(length)))
+    }
+
+    /// The start of a zlib stream holding `data`, ended with a sync flush rather than the stream's
+    /// end, as ZRLE's stream, which lasts the whole connection, is sent.
+    private static func deflateFlushed(_ data: Data) -> [UInt8] {
+        var stream = z_stream()
+        guard deflateInit_(&stream, 6, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { return [] }
+        defer { deflateEnd(&stream) }
+        var input = [UInt8](data)
+        var output = [UInt8](repeating: 0, count: Int(compressBound(uLong(data.count))) + 64)
+        let produced: Int = input.withUnsafeMutableBufferPointer { input in
+            output.withUnsafeMutableBufferPointer { output in
+                stream.next_in = input.baseAddress
+                stream.avail_in = uInt(input.count)
+                stream.next_out = output.baseAddress
+                stream.avail_out = uInt(output.count)
+                _ = zlib.deflate(&stream, Z_SYNC_FLUSH)
+                return output.count - Int(stream.avail_out)
+            }
+        }
+        return Array(output.prefix(produced))
     }
 
     /// Inflates a zlib stream that may end in a sync flush rather than the stream's end.

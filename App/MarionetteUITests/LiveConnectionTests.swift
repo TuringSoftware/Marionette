@@ -165,6 +165,14 @@ final class LiveConnectionTests: XCTestCase {
         // Plain VNC encrypts nothing, and says so.
         _ = waitConnected(app, expecting: "Standard · VNC · Not Secure")
         save(app, "live-vnc")
+        app.showControls()
+        app.buttons["more-menu"].waitToExist().tap()
+        app.buttons["quality-menu"].waitToExist().tap()
+        XCTAssertTrue(app.buttons["Adaptive Quality"].waitForExistence(timeout: 5), "VNC sessions offer a quality choice")
+        save(app, "live-vnc-quality-menu")
+        app.buttons["Full Quality"].tap()
+        Thread.sleep(forTimeInterval: 3)
+        save(app, "live-vnc-full")
         app.buttons["close-session"].waitToExist().tap()
         delete(app, card: card)
     }

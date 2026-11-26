@@ -48,6 +48,10 @@ Each layer depends only on the ones below it.
 - **C libraries keep to one thread each.** libssh2 runs non-blocking on a serial queue; LibVNCClient
   runs on its own thread and talks to Swift through a socket pair, because it wants a file
   descriptor and blocking reads.
+- **Plain VNC adapts in the client.** `SwiftVNCClient` measures the throughput of each update and
+  picks the JPEG quality and colour depth; the shim in `CLibVNCClient` keeps one update request
+  outstanding, so that a change of pixel format never meets an update already on its way, and
+  converts 256-colour pixels back to the 32-bit framebuffer the rest of the app sees.
 - **`ARDProtocol` and `ARDCrypto` are compiled optimised in every configuration.** Unoptimised
   big-number arithmetic made a debug login take about 3 s.
 - **Two licences.** Anything that links LibVNCClient is GPL-3.0-or-later; everything else is

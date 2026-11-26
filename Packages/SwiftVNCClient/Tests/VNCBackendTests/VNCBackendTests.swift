@@ -110,8 +110,30 @@ private func until(_ what: String, timeout: Duration = .seconds(5), _ condition:
         #expect(session.capabilities.clipboard.isAvailable)
         #expect(session.capabilities.audio.unavailableReason == .notSupportedByBackend)
         #expect(session.capabilities.displayConfiguration.unavailableReason == .notSupportedByBackend)
+        #expect(session.capabilities.quality.value?.supportedPresets == [.adaptive, .full])
         await session.disconnect()
         #expect(session.state == .disconnected(.userInitiated))
+    }
+
+    /// Full is lossless: no JPEG quality among the encodings (-32 to -23 are qualities 0 to 9).
+    @Test(arguments: [(QualityPreset.adaptive, [Int32(-24)]), (.full, [])])
+    func theChosenQualityIsWhatTheServerIsAskedFor(preset: QualityPreset, qualities: [Int32]) async throws {
+        let transport = ScriptedTransport()
+        let session = try await connect(transport, options: SessionOptions(quality: preset))
+        #expect(transport.latest.recorded.withLock { $0.encodings }.filter { (-32)...(-23) ~= $0 } == qualities)
+        await session.disconnect()
+    }
+
+    @Test func qualityCanBeChangedDuringASession() async throws {
+        let transport = ScriptedTransport()
+        let session = try await connect(transport)
+        let quality = try #require(session.capabilities.quality.value)
+        try await quality.setPreset(.full)
+        await until("JPEG is no longer asked for") {
+            !transport.latest.recorded.withLock { $0.encodings }.contains(-24)
+        }
+        await session.disconnect()
+        await #expect(throws: TransportError.self) { try await quality.setPreset(.adaptive) }
     }
 
     @Test func firstFrameCarriesTheServersPixels() async throws {
@@ -456,6 +478,7 @@ private func until(_ what: String, timeout: Duration = .seconds(5), _ condition:
         session.input.send(.pointer(PointerEvent(display: display.id, position: PixelPoint(x: 1, y: 1), layoutGeneration: session.layout.generation)))
         await session.suspend()
         await session.resume()
+        try await server.sendQueued()
         var iterator = offers.makeAsyncIterator()
         let offer = try #require(await iterator.next())
         #expect(try await offer.load() == [ClipboardItem(text: "from the server")])
@@ -497,6 +520,39 @@ private func until(_ what: String, timeout: Duration = .seconds(5), _ condition:
         let session = try await connect(transport)
         let events = session.events()
         await session.suspend()
+        await transport.latest.hangUp()
+        for await event in events {
+            if case .stateChanged(.disconnected(let reason)) = event {
+                #expect(reason.isRecoverable, "ended as \(reason)")
+                break
+            }
+        }
+    }
+
+    /// A request beside the one outstanding would freeze the colour depth, so a return from the
+    /// background shows what the client already has.
+    @Test(.timeLimit(.minutes(1))) func returningFromTheBackgroundShowsThePictureWithoutAskingTheServer() async throws {
+        let transport = ScriptedTransport()
+        let session = try await connect(transport)
+        let display = try #require(session.layout.displays.first)
+        let frames = session.frames(for: display.id)
+        _ = await frames.next()
+        let requests = transport.latest.recorded.withLock { $0.updateRequests }
+        await session.suspend()
+        await session.resume()
+        #expect(await frames.next() != nil)
+        #expect(transport.latest.recorded.withLock { $0.updateRequests } == requests)
+        await session.disconnect()
+    }
+
+    @Test(.timeLimit(.minutes(1))) func anEndJustAfterReturningFromTheBackgroundCanBeRecovered() async throws {
+        let transport = ScriptedTransport()
+        var backend = VNCBackend()
+        backend.resumeGraceTime = .seconds(30)
+        let session = try await backend.connect(ConnectionRequest(options: SessionOptions(), transport: transport, prompts: StaticPromptHandler(username: "", password: "")))
+        let events = session.events()
+        await session.suspend()
+        await session.resume()
         await transport.latest.hangUp()
         for await event in events {
             if case .stateChanged(.disconnected(let reason)) = event {

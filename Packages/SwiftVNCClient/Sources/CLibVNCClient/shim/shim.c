@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -28,6 +29,31 @@ typedef struct {
     char *encodings;
     /* Whether the encodings were looked at again after the first update (see `review_encodings`). */
     int encodings_reviewed;
+    /* Whether SetEncodings still asks for ExtendedDesktopSize (see `review_encodings`). */
+    int extended_desktop_size;
+    /* The caller's framebuffer, B, G, R, X: what the caller sees, whatever format the server sends. */
+    uint8_t *pixels;
+    /* The colour depth (see `marionette_vnc_set_full_colour`): what was asked for, and what the
+       server sends. */
+    int wanted_low_colour;
+    int low_colour;
+    /* Ask for the whole desktop when back in full colour. */
+    int refresh_in_full_colour;
+    /* LibVNCClient's framebuffer while in 256 colours, a byte a pixel, converted into `pixels`
+       rectangle by rectangle. */
+    uint8_t *low_pixels;
+    /* Update requests (see `request_next_update`): whether an update is being read, whether the
+       desktop changed size during it or outside one, and whether a request beyond the one the
+       shim keeps outstanding has ever gone out. */
+    int in_update;
+    int resized_in_update;
+    int resized_outside_update;
+    int requests_uncertain;
+    /* The JPEG quality asked for, -1 for none. LibVNCClient keeps its own copy in `appData`, but
+       sets it to 9 whenever a ZRLE rectangle arrives. */
+    int quality_level;
+    /* The server takes only full colour (see `marionette_vnc_keep_full_colour`). */
+    int full_colour_only;
     /* The extended-clipboard capabilities the server sent; 0 until it does. */
     uint32_t server_clipboard;
     /* Our clipboard text as the extended clipboard carries it: UTF-8, CR LF line ends, NUL-terminated.
@@ -204,8 +230,11 @@ static rfbBool send_encodings(rfbClient *client, const char *names, int extended
     if (compress && client->appData.compressLevel >= 0 && client->appData.compressLevel <= 9) {
         list[count++] = (uint32_t)(rfbEncodingCompressLevel0 + client->appData.compressLevel);
     }
-    if (quality && client->appData.enableJPEG && client->appData.qualityLevel >= 0 && client->appData.qualityLevel <= 9) {
-        list[count++] = (uint32_t)(rfbEncodingQualityLevel0 + client->appData.qualityLevel);
+    /* Tight has no JPEG in 256 colours, and LibVNCClient ends the session if a server sends one. */
+    client_state *state = state_of(client);
+    int level = state ? state->quality_level : -1;
+    if (quality && state && !state->low_colour && level >= 0 && level <= 9) {
+        list[count++] = (uint32_t)(rfbEncodingQualityLevel0 + level);
     }
     if (client->appData.useRemoteCursor) {
         list[count++] = rfbEncodingXCursor;
@@ -243,8 +272,176 @@ static void review_encodings(rfbClient *client, client_state *state) {
     if (state->encodings_reviewed) return;
     state->encodings_reviewed = 1;
     if (client->screen.width == 0 && client->screen.height == 0) {
+        state->extended_desktop_size = 0;
         send_encodings(client, state->encodings, 0);
     }
+}
+
+// MARK: - Colour depth
+
+/* Below full colour the server sends 256 colours, a byte a pixel: three bits of red and green and
+   two of blue, to which the eye is least sensitive. */
+static void set_format(rfbPixelFormat *format, int low_colour) {
+    memset(format, 0, sizeof(*format));
+    format->trueColour = TRUE;
+    format->bigEndian = FALSE;
+    if (low_colour) {
+        format->bitsPerPixel = 8;
+        format->depth = 8;
+        format->redMax = 7;
+        format->greenMax = 7;
+        format->blueMax = 3;
+        format->redShift = 5;
+        format->greenShift = 2;
+        format->blueShift = 0;
+    } else {
+        /* Little-endian 32-bit with blue in the low byte: B, G, R, X in memory. */
+        format->bitsPerPixel = 32;
+        format->depth = 24;
+        format->redMax = 255;
+        format->greenMax = 255;
+        format->blueMax = 255;
+        format->redShift = 16;
+        format->greenShift = 8;
+        format->blueShift = 0;
+    }
+}
+
+static rfbBool send_pixel_format(rfbClient *client, int low_colour) {
+    rfbPixelFormat format;
+    set_format(&format, low_colour);
+    uint8_t message[20] = {rfbSetPixelFormat};
+    message[4] = format.bitsPerPixel;
+    message[5] = format.depth;
+    message[6] = format.bigEndian;
+    message[7] = format.trueColour;
+    message[8] = (uint8_t)(format.redMax >> 8);
+    message[9] = (uint8_t)format.redMax;
+    message[10] = (uint8_t)(format.greenMax >> 8);
+    message[11] = (uint8_t)format.greenMax;
+    message[12] = (uint8_t)(format.blueMax >> 8);
+    message[13] = (uint8_t)format.blueMax;
+    message[14] = format.redShift;
+    message[15] = format.greenShift;
+    message[16] = format.blueShift;
+    return WriteToRFBServer(client, (const char *)message, sizeof(message));
+}
+
+/* A 256-colour pixel as B, G, R, X, each component stretched to the full 0–255. */
+static uint32_t low_colour_table[256];
+static pthread_once_t low_colour_once = PTHREAD_ONCE_INIT;
+
+static void build_low_colour_table(void) {
+    for (int pixel = 0; pixel < 256; pixel++) {
+        uint32_t red = (uint32_t)((pixel >> 5) & 7) * 255 / 7;
+        uint32_t green = (uint32_t)((pixel >> 2) & 7) * 255 / 7;
+        uint32_t blue = (uint32_t)(pixel & 3) * 255 / 3;
+        low_colour_table[pixel] = red << 16 | green << 8 | blue;
+    }
+}
+
+static void expand_low_colour(const uint8_t *source, uint8_t *destination, size_t count) {
+    pthread_once(&low_colour_once, build_low_colour_table);
+    for (size_t index = 0; index < count; index++) {
+        uint32_t value = low_colour_table[source[index]];
+        memcpy(destination + index * 4, &value, 4);
+    }
+}
+
+/* Copies a rectangle LibVNCClient decoded in 256 colours into the caller's framebuffer. */
+static void expand_rect(rfbClient *client, client_state *state, int x, int y, int width, int height) {
+    if (!state->low_pixels || !state->pixels) return;
+    if (x < 0) { width += x; x = 0; }
+    if (y < 0) { height += y; y = 0; }
+    if (x + width > client->width) width = client->width - x;
+    if (y + height > client->height) height = client->height - y;
+    for (int row = y; row < y + height; row++) {
+        size_t offset = (size_t)row * (size_t)client->width + (size_t)x;
+        expand_low_colour(state->low_pixels + offset, state->pixels + offset * 4, (size_t)(width > 0 ? width : 0));
+    }
+}
+
+/* Storage for the 256-colour framebuffer at the desktop's current size. */
+static rfbBool allocate_low_pixels(rfbClient *client, client_state *state) {
+    free(state->low_pixels);
+    size_t count = (size_t)client->width * (size_t)client->height;
+    state->low_pixels = calloc(count > 0 ? count : 1, 1);
+    return state->low_pixels != NULL;
+}
+
+/* Points LibVNCClient at a framebuffer in the format updates are now decoded in. Into 256 colours
+   the picture so far is reduced too, so that CopyRect still copies what is on the screen. */
+static void adopt_format(rfbClient *client, client_state *state) {
+    if (state->low_colour) {
+        size_t count = (size_t)client->width * (size_t)client->height;
+        if (state->pixels) {
+            for (size_t index = 0; index < count; index++) {
+                const uint8_t *pixel = state->pixels + index * 4;
+                state->low_pixels[index] = (uint8_t)((pixel[2] >> 5) << 5 | (pixel[1] >> 5) << 2 | pixel[0] >> 6);
+            }
+        }
+        client->frameBuffer = state->low_pixels;
+    } else {
+        client->frameBuffer = state->pixels;
+        free(state->low_pixels);
+        state->low_pixels = NULL;
+    }
+    set_format(&client->format, state->low_colour);
+}
+
+// MARK: - Update requests
+
+/* An update in flight when the server takes a SetPixelFormat is still in the old format, so the
+   client must know of every update in flight when it changes format. It does by keeping exactly one
+   request outstanding: the shim asks for the next update at the end of each one, and LibVNCClient's
+   own requests (after every update, and in the middle of one after a DesktopSize) are held back by
+   keeping `requestedResize` set, which makes it skip them. LibVNCClient clears the flag when an
+   ExtendedDesktopSize arrives; if that was the update's last rectangle, the library asks for the
+   next update itself and the shim does not.
+
+   A request asked for outside that rhythm (`marionette_vnc_request_update`) is needed on a still
+   desktop, where the outstanding incremental request may go unanswered for good; but whether a
+   server answers both with one update or with two cannot be told, so from then on the colour depth
+   stays as it is. */
+static void send_request(rfbClient *client, int incremental) {
+    client->requestedResize = FALSE;
+    SendFramebufferUpdateRequest(client, 0, 0, client->width, client->height, incremental ? TRUE : FALSE);
+    client->requestedResize = TRUE;
+}
+
+static void update_starting(client_state *state) {
+    state->in_update = 1;
+    if (state->callbacks.started) state->callbacks.started(state->callbacks.context);
+}
+
+/* At the end of an update, with nothing outstanding: the moment to change the format, before the
+   next request goes. */
+static int can_change_colour(const rfbClient *client, const client_state *state) {
+    int version_ok = client->major > 3 || (client->major == 3 && client->minor >= 8);
+    return version_ok && !state->requests_uncertain && !state->full_colour_only;
+}
+
+static void request_next_update(rfbClient *client, client_state *state) {
+    state->in_update = 0;
+    if (!client->requestedResize) {
+        /* The library asked incrementally; a resize in this update still wants the whole desktop,
+           which the shim asks for at the end of the next one. */
+        client->requestedResize = TRUE;
+        return;
+    }
+    int incremental = !state->resized_in_update;
+    state->resized_in_update = 0;
+    /* The 256-colour framebuffer is allocated before the server is told, so that running out of
+       memory leaves both in full colour. */
+    if (state->wanted_low_colour != state->low_colour && can_change_colour(client, state)
+        && (!state->wanted_low_colour || allocate_low_pixels(client, state))) {
+        state->low_colour = state->wanted_low_colour;
+        send_pixel_format(client, state->low_colour);
+        send_encodings(client, state->encodings, state->extended_desktop_size);
+        adopt_format(client, state);
+        if (!state->low_colour && state->refresh_in_full_colour) incremental = 0;
+    }
+    send_request(client, incremental);
 }
 
 // MARK: - Clipboard
@@ -408,22 +605,36 @@ static void on_cut_text_utf8(rfbClient *client, const char *text, int length) {
 // MARK: - Callbacks
 
 static rfbBool on_malloc_framebuffer(rfbClient *client) {
-    marionette_vnc_callbacks *callbacks = callbacks_of(client);
+    client_state *state = state_of(client);
     client->frameBuffer = NULL;
-    if (!callbacks || !callbacks->resize) return FALSE;
-    client->frameBuffer = callbacks->resize(callbacks->context, client->width, client->height);
-    return client->frameBuffer != NULL;
+    if (!state || !state->callbacks.resize) return FALSE;
+    state->pixels = state->callbacks.resize(state->callbacks.context, client->width, client->height);
+    if (!state->pixels) return FALSE;
+    if (state->low_colour && !allocate_low_pixels(client, state)) return FALSE;
+    client->frameBuffer = state->low_colour ? state->low_pixels : state->pixels;
+    /* A new size needs the whole desktop: LibVNCClient's own request for it is held back. */
+    if (state->in_update) {
+        state->resized_in_update = 1;
+    } else if (client->requestedResize) {
+        state->resized_outside_update = 1;
+    }
+    return TRUE;
 }
 
 static void on_update(rfbClient *client, int x, int y, int width, int height) {
-    marionette_vnc_callbacks *callbacks = callbacks_of(client);
-    if (callbacks && callbacks->update) callbacks->update(callbacks->context, x, y, width, height);
+    client_state *state = state_of(client);
+    if (!state) return;
+    /* An ExtendedDesktopSize earlier in the update cleared it (see `send_request`). */
+    client->requestedResize = TRUE;
+    if (state->low_colour) expand_rect(client, state, x, y, width, height);
+    if (state->callbacks.update) state->callbacks.update(state->callbacks.context, x, y, width, height);
 }
 
 static void on_finished(rfbClient *client) {
     client_state *state = state_of(client);
     if (!state) return;
     review_encodings(client, state);
+    request_next_update(client, state);
     if (state->callbacks.finished) state->callbacks.finished(state->callbacks.context);
 }
 
@@ -455,8 +666,17 @@ static rfbCredential *on_credential(rfbClient *client, int type) {
 
 static void on_cursor(rfbClient *client, int hotspot_x, int hotspot_y, int width, int height, int bytes_per_pixel) {
     marionette_vnc_callbacks *callbacks = callbacks_of(client);
-    if (!callbacks || !callbacks->cursor || bytes_per_pixel != 4 || !client->rcSource || !client->rcMask) return;
-    callbacks->cursor(callbacks->context, hotspot_x, hotspot_y, width, height, client->rcSource, client->rcMask);
+    if (!callbacks || !callbacks->cursor || !client->rcSource || !client->rcMask || width <= 0 || height <= 0) return;
+    if (bytes_per_pixel == 4) {
+        callbacks->cursor(callbacks->context, hotspot_x, hotspot_y, width, height, client->rcSource, client->rcMask);
+    } else if (bytes_per_pixel == 1) {
+        size_t count = (size_t)width * (size_t)height;
+        uint8_t *pixels = malloc(count * 4);
+        if (!pixels) return;
+        expand_low_colour(client->rcSource, pixels, count);
+        callbacks->cursor(callbacks->context, hotspot_x, hotspot_y, width, height, pixels, client->rcMask);
+        free(pixels);
+    }
 }
 
 static void on_bell(rfbClient *client) {
@@ -477,19 +697,11 @@ marionette_vnc_client *marionette_vnc_create(const marionette_vnc_callbacks *cal
         return NULL;
     }
     state->callbacks = *callbacks;
+    state->extended_desktop_size = 1;
+    state->quality_level = -1;
     rfbClientSetClientData(client, &state_tag, state);
 
-    /* Little-endian 32-bit with blue in the low byte: B, G, R, X in memory. */
-    client->format.bitsPerPixel = 32;
-    client->format.depth = 24;
-    client->format.bigEndian = FALSE;
-    client->format.trueColour = TRUE;
-    client->format.redMax = 255;
-    client->format.greenMax = 255;
-    client->format.blueMax = 255;
-    client->format.redShift = 16;
-    client->format.greenShift = 8;
-    client->format.blueShift = 0;
+    set_format(&client->format, 0);
 
     client->canHandleNewFBSize = TRUE;
     client->appData.useRemoteCursor = TRUE;
@@ -511,13 +723,47 @@ void marionette_vnc_set_encodings(marionette_vnc_client *handle, const char *enc
     state->encodings = strdup(encodings);
     client->appData.encodingsString = state->encodings;
     client->appData.compressLevel = compress_level;
+    /* Without JPEG LibVNCClient would still ask for a quality, level 5. */
+    client->appData.enableJPEG = quality_level >= 0 ? TRUE : FALSE;
     client->appData.qualityLevel = quality_level;
+    state->quality_level = quality_level < 0 ? -1 : quality_level;
+}
+
+int marionette_vnc_set_quality(marionette_vnc_client *handle, int quality_level) {
+    rfbClient *client = &handle->rfb;
+    client_state *state = state_of(client);
+    if (quality_level < 0) quality_level = -1;
+    if (state->quality_level == quality_level) return 1;
+    state->quality_level = quality_level;
+    client->appData.enableJPEG = quality_level >= 0 ? TRUE : FALSE;
+    client->appData.qualityLevel = quality_level;
+    return send_encodings(client, state->encodings, state->extended_desktop_size) ? 1 : 0;
+}
+
+int marionette_vnc_set_full_colour(marionette_vnc_client *handle, int full_colour, int refresh) {
+    client_state *state = state_of(&handle->rfb);
+    /* Before the handshake the server's version is not known, and the wish is kept for it. */
+    if (handle->rfb.major != 0 && !can_change_colour(&handle->rfb, state)) return 0;
+    state->wanted_low_colour = full_colour ? 0 : 1;
+    state->refresh_in_full_colour = refresh;
+    return 1;
+}
+
+void marionette_vnc_keep_full_colour(marionette_vnc_client *handle) {
+    client_state *state = state_of(&handle->rfb);
+    state->full_colour_only = 1;
+    state->wanted_low_colour = 0;
+}
+
+int marionette_vnc_can_change_colour(const marionette_vnc_client *handle) {
+    return can_change_colour(&handle->rfb, state_of((rfbClient *)&handle->rfb));
 }
 
 static void free_state(client_state *state) {
     if (!state) return;
     free(state->encodings);
     free(state->clipboard);
+    free(state->low_pixels);
     free(state);
 }
 
@@ -551,6 +797,8 @@ int marionette_vnc_connect(marionette_vnc_client *handle, int socket, int shared
     }
     /* From here on these describe how the session ended. */
     last_error[0] = '\0';
+    /* rfbInitClient has asked for the first update; the shim asks for the rest (see `send_request`). */
+    client->requestedResize = TRUE;
     return 1;
 }
 
@@ -586,7 +834,24 @@ static rfbBool handle_message(rfbClient *client) {
     if (type == rfbServerCutText) return handle_cut_text(client);
     client->bufoutptr--;
     client->buffered++;
-    return HandleRFBServerMessage(client);
+    client_state *state = state_of(client);
+    if (!state) return HandleRFBServerMessage(client);
+    if (type == rfbFramebufferUpdate) update_starting(state);
+    if (!HandleRFBServerMessage(client)) return FALSE;
+    /* UltraVNC's resize messages come between updates, and LibVNCClient's request for the new
+       desktop was held back. */
+    if (state->resized_outside_update) {
+        state->resized_outside_update = 0;
+        state->requests_uncertain = 1;
+        send_request(client, 0);
+    }
+    return TRUE;
+}
+
+long marionette_vnc_unread_bytes(const marionette_vnc_client *handle) {
+    int pending = 0;
+    if (ioctl(handle->rfb.sock, FIONREAD, &pending) != 0) pending = 0;
+    return (long)pending + (handle->rfb.buffered > 0 ? handle->rfb.buffered : 0);
 }
 
 int marionette_vnc_process(marionette_vnc_client *handle) {
@@ -641,7 +906,14 @@ int marionette_vnc_send_clipboard(marionette_vnc_client *handle, const char *utf
 }
 
 int marionette_vnc_request_update(marionette_vnc_client *handle, int x, int y, int width, int height, int incremental) {
-    return SendFramebufferUpdateRequest(&handle->rfb, x, y, width, height, incremental ? TRUE : FALSE) ? 1 : 0;
+    rfbClient *client = &handle->rfb;
+    client_state *state = state_of(client);
+    /* One request beyond the one kept outstanding (see `send_request`). */
+    state->requests_uncertain = 1;
+    client->requestedResize = FALSE;
+    rfbBool sent = SendFramebufferUpdateRequest(client, x, y, width, height, incremental ? TRUE : FALSE);
+    client->requestedResize = TRUE;
+    return sent ? 1 : 0;
 }
 
 void marionette_vnc_destroy(marionette_vnc_client *handle) {

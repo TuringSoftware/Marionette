@@ -23,6 +23,8 @@ typedef struct {
      * A server may report 0 × 0 until it has something to show; storage for one pixel is enough then.
      */
     uint8_t *(*resize)(void *context, int width, int height);
+    /** A framebuffer update is about to be read: its message type has arrived, nothing more of it. */
+    void (*started)(void *context);
     /** A rectangle of the framebuffer has new pixels. More rectangles of the same update may follow. */
     void (*update)(void *context, int x, int y, int width, int height);
     /** A framebuffer update is complete. */
@@ -59,8 +61,35 @@ typedef enum {
 /** Creates a client that will deliver 32-bit B, G, R, X pixels. */
 marionette_vnc_client *marionette_vnc_create(const marionette_vnc_callbacks *callbacks);
 
-/** Space-separated encoding names in order of preference, and levels 0–9. */
+/** Space-separated encoding names in order of preference, and levels 0–9; a quality of -1 asks for no JPEG. */
 void marionette_vnc_set_encodings(marionette_vnc_client *client, const char *encodings, int compress_level, int quality_level);
+
+/**
+ * Changes the JPEG quality, 0 (small) to 9 (faithful), or -1 for none, and tells a connected server
+ * at once. Returns 0 if the message could not be sent.
+ */
+int marionette_vnc_set_quality(marionette_vnc_client *client, int quality_level);
+
+/**
+ * Asks for full colour (1) or 256 colours (0), from the end of the next framebuffer update; the
+ * framebuffer handed to `resize` stays in 32-bit pixels throughout. In 256 colours JPEG is not asked
+ * for. With `refresh`, the whole desktop is asked for again once back in full colour. Returns 0, and
+ * changes nothing, when the depth can no longer change (see `marionette_vnc_can_change_colour`).
+ */
+int marionette_vnc_set_full_colour(marionette_vnc_client *client, int full_colour, int refresh);
+
+/**
+ * Keeps the session in full colour from now on, for a server that refuses fewer colours. Call it
+ * before the first update ends.
+ */
+void marionette_vnc_keep_full_colour(marionette_vnc_client *client);
+
+/**
+ * Whether the colour depth can still change: not with a server before RFB 3.8, nor in a session that
+ * has used `marionette_vnc_request_update` or `marionette_vnc_keep_full_colour`. Meaningful once
+ * connected.
+ */
+int marionette_vnc_can_change_colour(const marionette_vnc_client *client);
 
 /**
  * Runs the RFB handshake and authentication over an already connected socket.
@@ -86,6 +115,12 @@ void marionette_vnc_server_version(int *major, int *minor);
  */
 int marionette_vnc_wait(marionette_vnc_client *client, int wake_fd, int timeout_ms);
 
+/**
+ * Bytes handed to the client's socket that it has not consumed yet: those still in the socket and
+ * those LibVNCClient has read ahead.
+ */
+long marionette_vnc_unread_bytes(const marionette_vnc_client *client);
+
 /** Handles every server message that is ready. Returns 0 when the connection is over. */
 int marionette_vnc_process(marionette_vnc_client *client);
 
@@ -102,6 +137,11 @@ int marionette_vnc_send_clipboard(marionette_vnc_client *client, const char *utf
  * that would expose one disabling the other. Returns 1 when they are.
  */
 int marionette_vnc_crypto_self_test(void);
+/**
+ * Asks for an update at once, beside the one the client keeps outstanding: for a still desktop,
+ * which leaves that one unanswered. From then on the colour depth stays as it is (see
+ * `marionette_vnc_set_full_colour`).
+ */
 int marionette_vnc_request_update(marionette_vnc_client *client, int x, int y, int width, int height, int incremental);
 
 void marionette_vnc_destroy(marionette_vnc_client *client);

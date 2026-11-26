@@ -17,6 +17,10 @@ public struct VNCBackend: RemoteDesktopBackend {
     /// discards keyboard and pointer events for about two seconds (measured on macOS 27.0.1 on its
     /// own protocol, the same daemon serving this one).
     public var inputSettlingTimeForMacs: Duration = .milliseconds(2600)
+    /// After a return from the background, an end within this long, before any new picture, is put
+    /// down to the time away and is worth a reconnect. A connection the system took from the
+    /// suspended app fails as soon as it is read again.
+    public var resumeGraceTime: Duration = .seconds(5)
 
     public init() {}
 
@@ -59,7 +63,7 @@ public struct VNCBackend: RemoteDesktopBackend {
             }
 
             if attempt == 1 { request.progress(.negotiating) }
-            let core = VNCSessionCore(options: request.options, remoteHost: host, isTunnelled: transport.isTunnelled)
+            let core = VNCSessionCore(options: request.options, remoteHost: host, isTunnelled: transport.isTunnelled, resumeGraceTime: resumeGraceTime)
             let asked = Mutex(false)
             var handlers = core.handlers()
             let (prompts, progress, failureText) = (request.prompts, request.progress, previousFailure)
@@ -88,6 +92,7 @@ public struct VNCBackend: RemoteDesktopBackend {
             }
             var configuration = VNCConfiguration()
             configuration.sharesDesktop = true
+            configuration.quality = VNCQualityControl.quality(for: request.options.quality)
             let client = VNCClient(transport: ByteStreamTransport(stream: stream), configuration: configuration, handlers: handlers)
 
             let info: VNCServerInfo
@@ -218,9 +223,11 @@ final class VNCSessionCore: Sendable, InputSink {
         var cursor = CursorState()
         var controlMode: ControlMode
         var isSuspended = false
-        /// Resumed, and no picture has arrived since: an end now means the connection did not
-        /// survive the time in the background.
+        /// Resumed, and neither a picture from the server nor the grace time has come since: an end
+        /// now means the connection did not survive the time in the background.
         var awaitsPictureAfterResume = false
+        /// Counts returns from the background, so that a grace time ends only the one it began with.
+        var resumes = 0
         /// How Option and Command go out: a Mac's own server reads keysyms its own way.
         var keyStyle: X11Keysym.ModifierStyle = .standard
         /// Input is held until then, and sent in order when the time comes (see `setServer`).
@@ -246,6 +253,8 @@ final class VNCSessionCore: Sendable, InputSink {
     let options: SessionOptions
     let remoteHost: String
     let isTunnelled: Bool
+    /// See ``VNCBackend/resumeGraceTime``.
+    let resumeGraceTime: Duration
     let shared: Mutex<Shared>
     let events = Broadcaster<SessionEvent>()
     let cursorUpdates = Broadcaster<CursorState>(replaysLatest: true, bufferingPolicy: .bufferingNewest(1))
@@ -255,10 +264,11 @@ final class VNCSessionCore: Sendable, InputSink {
     /// Remote pixels of scrolling that make one wheel notch.
     static let pixelsPerNotch = 40.0
 
-    init(options: SessionOptions, remoteHost: String, isTunnelled: Bool) {
+    init(options: SessionOptions, remoteHost: String, isTunnelled: Bool, resumeGraceTime: Duration) {
         self.options = options
         self.remoteHost = remoteHost
         self.isTunnelled = isTunnelled
+        self.resumeGraceTime = resumeGraceTime
         shared = Mutex(Shared(controlMode: options.controlMode))
         // Until the server sends a shape the viewer draws its own arrow where it last put the pointer.
         cursorUpdates.send(CursorState())
@@ -358,7 +368,7 @@ final class VNCSessionCore: Sendable, InputSink {
     private func updated(_ framebuffer: VNCFramebuffer, _ changed: [VNCRect]) {
         let changedRects = changed.map { PixelRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }
         let (hub, generation, suspended, buffer, pending) = shared.withLock { shared in
-            if !shared.isSuspended { shared.awaitsPictureAfterResume = false }
+            if !shared.isSuspended, !framebuffer.isRepublished { shared.awaitsPictureAfterResume = false }
             let buffer = shared.isSuspended ? nil : shared.snapshotBuffers.buffer(width: framebuffer.width, height: framebuffer.height)
             let pending = shared.pendingDamage + changedRects
             shared.pendingDamage = buffer == nil && !shared.isSuspended ? pending : []
@@ -367,7 +377,8 @@ final class VNCSessionCore: Sendable, InputSink {
         guard !suspended else { return }
         guard let buffer, let surface = Self.fill(buffer, from: framebuffer) else {
             // Every buffer is still in use. A still screen would send nothing more to carry this
-            // picture, so ask for the whole of it again shortly.
+            // picture, so the client hands it over again shortly. The client has it already;
+            // asking the server would also freeze the colour depth (see `requestFullUpdate`).
             let retry = shared.withLock { shared in
                 defer { shared.isRetryingPicture = true }
                 return shared.isRetryingPicture ? nil : shared.client
@@ -376,7 +387,7 @@ final class VNCSessionCore: Sendable, InputSink {
                 Task { [weak self] in
                     try? await Task.sleep(for: .milliseconds(30))
                     self?.shared.withLock { $0.isRetryingPicture = false }
-                    retry.requestFullUpdate()
+                    retry.republish()
                 }
             }
             return
@@ -533,12 +544,27 @@ final class VNCSessionCore: Sendable, InputSink {
             }
             shared.isSuspended = suspended
             shared.awaitsPictureAfterResume = !suspended
+            if !suspended { shared.resumes += 1 }
             shared.state = suspended ? .suspended : .connected
             return (true, shared.client)
         }
         if let client = result.client {
             for action in actions { action(client) }
-            if !suspended { client.requestFullUpdate() }
+            if suspended {
+                client.willSuspend()
+            } else {
+                // The client went on reading while the app was away; what it has is the picture to
+                // show. Asking the server instead would freeze the colour depth
+                // (see `requestFullUpdate`).
+                client.republish()
+                let resume = shared.withLock { $0.resumes }
+                Task { [weak self, resumeGraceTime] in
+                    try? await Task.sleep(for: resumeGraceTime)
+                    self?.shared.withLock { shared in
+                        if shared.resumes == resume, !shared.isSuspended { shared.awaitsPictureAfterResume = false }
+                    }
+                }
+            }
         }
         if result.changed { events.send(.stateChanged(suspended ? .suspended : .connected)) }
         return result.changed
@@ -582,7 +608,7 @@ public final class VNCSession: RemoteSession {
             : .unavailable(.notConfigured(detail: String(localized: "Clipboard sharing is switched off for this computer.", bundle: #bundle)))
         capabilities.control = .available(VNCControl(core: core))
         capabilities.audio = .unavailable(.notSupportedByBackend)
-        capabilities.quality = .unavailable(.notSupportedByBackend)
+        capabilities.quality = .available(VNCQualityControl(core: core))
         capabilities.displayConfiguration = .unavailable(.notSupportedByBackend)
         core.shared.withLock { shared in
             // The handshake may already have ended the session; do not revive it.
@@ -646,6 +672,29 @@ final class VNCClipboard: ClipboardSync {
         // sending it as empty text would wipe the remote clipboard.
         guard let text = items.lazy.compactMap(\.text).first else { return }
         client.sendClipboard(text)
+    }
+}
+
+/// Adaptive follows the link, lowering JPEG quality and then colours as it slows; Full is lossless.
+final class VNCQualityControl: QualityControl {
+    private weak let core: VNCSessionCore?
+
+    init(core: VNCSessionCore) {
+        self.core = core
+    }
+
+    static func quality(for preset: QualityPreset) -> VNCQuality {
+        switch preset {
+        case .adaptive: .automatic
+        case .full: .lossless
+        }
+    }
+
+    var supportedPresets: [QualityPreset] { [.adaptive, .full] }
+
+    func setPreset(_ preset: QualityPreset) async throws {
+        guard let client = core?.shared.withLock({ $0.client }) else { throw TransportError.closed }
+        client.setQuality(Self.quality(for: preset))
     }
 }
 
