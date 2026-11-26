@@ -8,6 +8,22 @@ Marionette is a remote desktop app for iPhone, iPad and iPhone Duo. It is built 
 Sharing server that ships with every Mac, speaking Apple's own protocol, including High Performance
 mode, and works with any VNC server as a fallback.
 
+<p align="center">
+  <img src="Docs/images/duo-library.jpg" width="49%"
+       alt="The library on an open iPhone Duo: three saved Macs, and two more found on the network">
+  <img src="Docs/images/duo-session.jpg" width="49%"
+       alt="A Mac's desktop filling an open iPhone Duo, with the control strip down one side">
+</p>
+<p align="center">
+  <img src="Docs/images/duo-keyboard.jpg" width="30%"
+       alt="A session on an iPhone Duo held upright, with the system keyboard and its bar of modifier keys">
+  <img src="Docs/images/duo-laptop-pose.jpg" width="30%"
+       alt="A half-open iPhone Duo: the Mac's desktop above the fold and a full Mac keyboard below it">
+</p>
+<p align="center">
+  <em>On iPhone Duo: the library, a session, the system keyboard, and the Mac keyboard below the fold.</em>
+</p>
+
 ## Features
 
 - **Apple Screen Sharing.** Signs in with the Mac's account (SRP), encrypts the whole session, and
