@@ -41,8 +41,10 @@ remember writing.
 ## 5. Test again
 
 Steps 2 to 4 changed code. Run what CONTRIBUTING.md requires again, as
-[Docs/testing.md](../../../Docs/testing.md) describes, UI tests included, and fix what fails. Report
-a test you could not run; never report it as passed.
+[Docs/testing.md](../../../Docs/testing.md) describes, and fix what fails. Run the UI tests only when
+the change touches the UI: a screen, control, gesture or user-visible text, or code under `App/`.
+A change to scripts, documentation, skills or CI skips them; say so in the report. Report a test
+you could not run; never report it as passed.
 
 ## 6. Fix the attribution
 

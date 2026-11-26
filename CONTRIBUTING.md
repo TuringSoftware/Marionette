@@ -11,8 +11,9 @@ A pull request is ready when all of this holds:
    accessibility and dependencies.
 2. **It is tested as [Testing](Docs/testing.md) describes.**
    - `Scripts/test.sh` passes.
-   - **The UI tests pass**: the whole suite, on an iPhone and on an iPad simulator. Run them even for
-     a change that seems to have nothing to do with the UI.
+   - **The UI tests pass** when the change touches the UI (a screen, control, gesture or
+     user-visible text, or code under `App/`): the whole suite, on an iPhone and on an iPad
+     simulator. A change only to scripts, documentation, skills or CI does not need them.
    - New behaviour comes with tests, and a fixed bug with a test that fails without the fix.
    - A change to a back end, a transport or anything else that talks to a real computer is also run
      through the live tests. Say in the pull request which machine and which macOS it ran against.
