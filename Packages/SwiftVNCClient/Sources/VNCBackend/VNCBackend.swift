@@ -485,9 +485,9 @@ final class VNCSessionCore: Sendable, InputSink {
                 // Positive deltas move content down or right: wheel up (bit 3) and wheel left (bit 5).
                 click(notchesY > 0 ? 1 << 3 : 1 << 4, times: abs(notchesY))
                 click(notchesX > 0 ? 1 << 5 : 1 << 6, times: abs(notchesX))
-            case .gesture:
-                // RFB has no gestures. Stand-ins (a modifier with the wheel for a pinch, say) mean
-                // different things to different desktops, so none is sent.
+            case .gesture, .touch:
+                // RFB has no gestures and no touches. Stand-ins (a modifier with the wheel for a
+                // pinch, say) mean different things to different desktops, so none is sent.
                 break
             case .releaseAll:
                 actions = Self.releaseEverything(&shared)

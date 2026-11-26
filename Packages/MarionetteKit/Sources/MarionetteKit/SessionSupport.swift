@@ -115,6 +115,9 @@ public struct SessionFeatures: Sendable, Hashable {
     public var isCurtained = false
     public var maximumVirtualDisplays = 0
     public var canSelectPhysicalDisplays = false
+    /// The remote machine takes fingers as they are, as a touch screen of its own; `nil` when it
+    /// does not.
+    public var touch: TouchInput?
 
     public init() {}
 
@@ -133,6 +136,7 @@ public struct SessionFeatures: Sendable, Hashable {
             maximumVirtualDisplays = limits.maximumVirtualDisplays
             canSelectPhysicalDisplays = limits.canSelectPhysicalDisplays
         }
+        touch = capabilities.touch.value
     }
 }
 
@@ -155,7 +159,10 @@ public struct InputTally: Sendable, Hashable {
     public private(set) var clicks = 0
     public private(set) var secondaryClicks = 0
     public private(set) var scrolls = 0
+    /// Fingers that landed on a remote machine that takes touches.
+    public private(set) var touches = 0
     private var buttons: PointerButtons = []
+    private var touching: Set<Int> = []
 
     public init() {}
 
@@ -175,8 +182,13 @@ public struct InputTally: Sendable, Hashable {
             buttons = pointer.buttons
         case .scroll(let scroll) where scroll.phase == .began || scroll.phase == .none:
             scrolls += 1
+        case .touch(let touch):
+            let down = Set(touch.contacts.filter { $0.phase == .touching }.map(\.id))
+            touches += down.subtracting(touching).count
+            touching = down
         case .releaseAll:
             buttons = []
+            touching = []
         default:
             break
         }
@@ -184,7 +196,7 @@ public struct InputTally: Sendable, Hashable {
 
     /// One line, for an accessibility value.
     public var summary: String {
-        String(localized: "typed “\(typed)”, \(keyPresses) key presses, \(clicks) clicks, \(secondaryClicks) secondary clicks, \(scrolls) scrolls", bundle: #bundle)
+        String(localized: "typed “\(typed)”, \(keyPresses) key presses, \(clicks) clicks, \(secondaryClicks) secondary clicks, \(scrolls) scrolls, \(touches) touches", bundle: #bundle)
     }
 }
 

@@ -22,6 +22,10 @@ private struct Fuzzer<Interpreter: GestureInterpreter> {
     var gesturing = false
     var keysDown: Set<KeyCode> = []
     var events = 0
+    /// The most fingers the interpreter may send as touches; `nil` for one that sends none.
+    var maximumContacts: Int?
+    /// Contact ids the remote machine has been told are touching.
+    var touching: Set<Int> = []
 
     mutating func check(_ effects: [InteractionEffect], _ step: String) {
         for effect in effects {
@@ -79,6 +83,24 @@ private struct Fuzzer<Interpreter: GestureInterpreter> {
                 if let key = event.key { if event.phase == .down { keysDown.insert(key) } else { keysDown.remove(key) } }
             case .text, .releaseAll:
                 Issue.record("interpreters never send text: \(step)")
+            case .touch(let event):
+                guard let maximumContacts else {
+                    Issue.record("only the direct-touch interpreter sends touches: \(step)")
+                    continue
+                }
+                let ids = event.contacts.map(\.id)
+                #expect(Set(ids).count == ids.count, "a contact twice in one event: \(step)")
+                #expect(ids.allSatisfy { (0..<maximumContacts).contains($0) }, "contact id out of range: \(step)")
+                for contact in event.contacts {
+                    #expect(contact.position.x >= 0 && contact.position.x <= 799 && contact.position.y >= 0 && contact.position.y <= 599, "\(step)")
+                    if contact.phase == .touching {
+                        touching.insert(contact.id)
+                    } else {
+                        #expect(touching.remove(contact.id) != nil, "a contact let go that was not down: \(step)")
+                    }
+                }
+                // Every finger down is in every event.
+                #expect(Set(ids).isSuperset(of: touching), "a finger down left out of an event: \(step)")
             }
         }
         #expect(keysDown.isEmpty, "a key was left down: \(step)")
@@ -167,6 +189,7 @@ private struct Fuzzer<Interpreter: GestureInterpreter> {
         #expect(!scrolling)
         #expect(!coasting)
         #expect(!gesturing)
+        #expect(touching.isEmpty, "a finger left down on the remote machine")
     }
 }
 
@@ -201,6 +224,20 @@ private struct Fuzzer<Interpreter: GestureInterpreter> {
             context: seed.isMultiple(of: 2) ? fittedContext() : zoomedContext(),
             generator: SplitMix64(seed: UInt64(seed) &+ 5000)
         )
+        for index in 0..<400 { fuzzer.step(index) }
+        fuzzer.finish()
+        #expect(fuzzer.events > 0)
+    }
+
+    @Test(arguments: 1...40)
+    func directTouchNeverLeavesAFingerDown(seed: Int) {
+        let maximum = seed % 4 + 1
+        var fuzzer = Fuzzer(
+            interpreter: DirectTouchInterpreter(maximumContacts: maximum),
+            context: seed.isMultiple(of: 2) ? fittedContext() : zoomedContext(),
+            generator: SplitMix64(seed: UInt64(seed) &+ 9000)
+        )
+        fuzzer.maximumContacts = maximum
         for index in 0..<400 { fuzzer.step(index) }
         fuzzer.finish()
         #expect(fuzzer.events > 0)

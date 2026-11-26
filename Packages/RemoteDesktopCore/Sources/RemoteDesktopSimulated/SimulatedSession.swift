@@ -664,6 +664,16 @@ actor SimulatedEngine {
             echo.scroll = "Δ(\(Int(scroll.deltaX)), \(Int(scroll.deltaY))) total (\(Int(scrollTotal.x)), \(Int(scrollTotal.y)))"
         case .gesture(let gesture):
             echo.scroll = "gesture \(gesture.kind)"
+        case .touch(let touch):
+            guard touch.layoutGeneration == generation else { return }
+            let touching = touch.contacts.filter { $0.phase == .touching }
+            echo.pointer = touching.isEmpty
+                ? "\(touch.display) no fingers"
+                : "\(touch.display) " + touching.map { "(\(Int($0.position.x)), \(Int($0.position.y)))" }.joined(separator: " ")
+            // A finger that lifts marks the place, as a click does.
+            for contact in touch.contacts where contact.phase == .lifted {
+                clicks[touch.display] = Array(((clicks[touch.display] ?? []) + [contact.position]).suffix(9))
+            }
         case .releaseAll:
             buttonsDown = []
             echo.buttons = "—"

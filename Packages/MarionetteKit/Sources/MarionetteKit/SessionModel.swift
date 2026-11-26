@@ -135,6 +135,9 @@ public final class SessionModel: Identifiable {
     /// Bumped for every connection attempt so late callbacks from an old one are ignored.
     @ObservationIgnored private var attempt = 0
     @ObservationIgnored private var touchInterpreter = TouchInterpreter()
+    /// Touch mode, when the remote machine takes fingers as they are: it stands in for
+    /// `touchInterpreter`.
+    @ObservationIgnored private var directTouch: DirectTouchInterpreter?
     @ObservationIgnored private var stageTrackpad = TrackpadInterpreter(zoomAnchor: .touchCentroid)
     @ObservationIgnored private var deckTrackpad = TrackpadInterpreter(zoomAnchor: .pointer)
     @ObservationIgnored private var heldButtons: PointerButtons = []
@@ -459,7 +462,7 @@ public final class SessionModel: Identifiable {
         // Subscribe before reading the current values so that nothing can slip between the two.
         let events = session.events()
         info = session.info
-        features = SessionFeatures(session.capabilities)
+        setFeatures(SessionFeatures(session.capabilities))
         hasFirstFrame = false
         isRemoteScreenLocked = false
         heldButtons = []
@@ -558,7 +561,7 @@ public final class SessionModel: Identifiable {
         case .layoutChanged(let layout):
             apply(layout: layout, restartRenderer: false)
         case .capabilitiesChanged(let capabilities):
-            features = SessionFeatures(capabilities)
+            setFeatures(SessionFeatures(capabilities))
             files.setBuiltIn(capabilities.fileTransfer.value)
             if (capabilities.clipboard.value != nil) != clipboard.isAvailable {
                 clipboard.connected(capabilities.clipboard.value, isEncrypted: isSessionEncrypted)
@@ -573,6 +576,16 @@ public final class SessionModel: Identifiable {
         case .notice:
             break
         }
+    }
+
+    private func setFeatures(_ newFeatures: SessionFeatures) {
+        if newFeatures.touch != features.touch {
+            // Fingers down when the remote machine starts or stops taking touches are let go; the
+            // next ones go to the interpreter that fits.
+            if !(directTouch?.isIdle ?? true) || !touchInterpreter.isIdle { cancelGestures() }
+            directTouch = newFeatures.touch.map { DirectTouchInterpreter(maximumContacts: $0.maximumContacts) }
+        }
+        features = newFeatures
     }
 
     private func apply(layout newLayout: DesktopLayout, restartRenderer: Bool) {
@@ -1364,10 +1377,18 @@ public final class SessionModel: Identifiable {
                 return body(&interpreter, &context)
             }
         case (.stage, .touch):
-            interact(relative: false) { context in
-                var interpreter: any GestureInterpreter = touchInterpreter
-                defer { touchInterpreter = interpreter as? TouchInterpreter ?? touchInterpreter }
-                return body(&interpreter, &context)
+            if let directTouch {
+                interact(relative: false) { context in
+                    var interpreter: any GestureInterpreter = directTouch
+                    defer { self.directTouch = interpreter as? DirectTouchInterpreter ?? directTouch }
+                    return body(&interpreter, &context)
+                }
+            } else {
+                interact(relative: false) { context in
+                    var interpreter: any GestureInterpreter = touchInterpreter
+                    defer { touchInterpreter = interpreter as? TouchInterpreter ?? touchInterpreter }
+                    return body(&interpreter, &context)
+                }
             }
         case (.stage, .trackpad):
             interact(relative: true) { context in

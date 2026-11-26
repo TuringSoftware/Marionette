@@ -303,6 +303,48 @@ public struct GestureEvent: Sendable, Hashable {
     }
 }
 
+/// The fingers on one display, for a remote machine that takes them as a touch screen of its own
+/// (``SessionCapabilities/touch``). The remote machine decides what they mean.
+///
+/// Each event lists every finger on the display at that moment. A finger that lifts is in one more
+/// event, ``Contact/Phase-swift.enum/lifted`` or ``Contact/Phase-swift.enum/cancelled``, and in
+/// none after it.
+public struct TouchEvent: Sendable, Hashable {
+    public struct Contact: Sendable, Hashable {
+        public enum Phase: Sendable, Hashable {
+            case touching
+            case lifted
+            /// Taken away by the system rather than lifted: the remote machine abandons what the
+            /// finger started.
+            case cancelled
+        }
+
+        /// The finger, from landing to lifting: below ``TouchInput/maximumContacts``, and free for
+        /// another finger once it has lifted.
+        public var id: Int
+        /// Inside the display, in its pixels, origin top-left.
+        public var position: PixelPoint
+        public var phase: Phase
+
+        public init(id: Int, position: PixelPoint, phase: Phase = .touching) {
+            self.id = id
+            self.position = position
+            self.phase = phase
+        }
+    }
+
+    public var display: DisplayID
+    public var contacts: [Contact]
+    /// The ``DesktopLayout/generation`` the positions were computed against.
+    public var layoutGeneration: UInt64
+
+    public init(display: DisplayID, contacts: [Contact], layoutGeneration: UInt64) {
+        self.display = display
+        self.contacts = contacts
+        self.layoutGeneration = layoutGeneration
+    }
+}
+
 public enum InputEvent: Sendable, Hashable {
     case key(KeyEvent)
     /// Committed text from a software keyboard, input method, or dictation. The back end types it
@@ -311,8 +353,11 @@ public enum InputEvent: Sendable, Hashable {
     case pointer(PointerEvent)
     case scroll(ScrollEvent)
     case gesture(GestureEvent)
-    /// Release every key and button the session believes is held. Sent when the app loses focus so
-    /// nothing stays stuck on the remote machine.
+    /// Fingers on the remote display as on a touch screen; only where ``SessionCapabilities/touch``
+    /// is available. Back ends without it ignore them.
+    case touch(TouchEvent)
+    /// Release every key, button and finger the session believes is held. Sent when the app loses
+    /// focus so nothing stays stuck on the remote machine.
     case releaseAll
 }
 

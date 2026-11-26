@@ -134,7 +134,7 @@ func runSession(_ arguments: Arguments) async throws {
         log("display \(display.id): \(display.name), \(display.pixelSize.width) × \(display.pixelSize.height) at \(display.scale)x, \(display.kind), \(display.state)")
     }
     let capabilities = session.capabilities
-    log("capabilities: clipboard \(capabilities.clipboard.isAvailable), audio \(capabilities.audio.isAvailable), quality \(capabilities.quality.isAvailable), statistics \(capabilities.statistics.isAvailable), curtain \(describe(capabilities.curtain))")
+    log("capabilities: clipboard \(capabilities.clipboard.isAvailable), audio \(capabilities.audio.isAvailable), quality \(capabilities.quality.isAvailable), statistics \(capabilities.statistics.isAvailable), curtain \(describe(capabilities.curtain)), touch \(describe(capabilities.touch))")
 
     struct Counts {
         var frames: [DisplayID: Int] = [:]
@@ -365,6 +365,8 @@ func packedPixels(_ frame: DisplayFrame) -> Data {
 ///     show:all  show:ID    Standard mode: show all of the Mac's displays, or the one with that id
 ///     snap:NAME            save the picture as it is now (session --output decides where)
 ///     click:400,300        primary click at a position in the first display's pixels
+///     touch:400,300+500,300   the fingers now on the first display's touch screen, in its pixels, each
+///                          in the place of the one listed there before; touch: lifts them all
 ///     resize:1280x800@2    start resizing the virtual displays (points, scale) and go on meanwhile
 ///     move:400,300         move the pointer there
 ///     magnify:0.8          pinch, as the app sends it (also rotate:90, smartzoom:, lookup:, swipe:left,
@@ -395,6 +397,7 @@ func runInputScript(_ script: String, on session: any RemoteSession, log: @escap
         ("cmd", .leftCommand, .leftCommand), ("ctrl", .leftControl, .leftControl),
         ("opt", .leftOption, .leftOption), ("shift", .leftShift, .leftShift),
     ]
+    var fingers: [PixelPoint] = []
     for step in script.split(separator: ";").map({ $0.trimmingCharacters(in: .whitespaces) }) where !step.isEmpty {
         guard let colon = step.firstIndex(of: ":") else { throw Failure("script step “\(step)” has no colon") }
         let verb = step[..<colon]
@@ -611,6 +614,23 @@ func runInputScript(_ script: String, on session: any RemoteSession, log: @escap
             session.input.send(.pointer(PointerEvent(display: display.id, position: point, buttons: .primary, layoutGeneration: generation)))
             try await Task.sleep(for: .milliseconds(60))
             session.input.send(.pointer(PointerEvent(display: display.id, position: point, layoutGeneration: generation)))
+        case "touch":
+            guard session.capabilities.touch.isAvailable else {
+                throw Failure("touch: needs a session that takes touches: \(String(describing: session.capabilities.touch.unavailableReason))")
+            }
+            let points = try argument.split(separator: "+").map { finger in
+                let parts = finger.split(separator: ",").compactMap { Double($0) }
+                guard parts.count == 2 else { throw Failure("bad finger in “\(step)”") }
+                return PixelPoint(x: parts[0], y: parts[1])
+            }
+            guard let display = session.layout.displays.first else { throw Failure("no display to touch") }
+            let contacts = (0..<max(points.count, fingers.count)).map { id in
+                id < points.count
+                    ? TouchEvent.Contact(id: id, position: points[id])
+                    : TouchEvent.Contact(id: id, position: fingers[id], phase: .lifted)
+            }
+            fingers = points
+            session.input.send(.touch(TouchEvent(display: display.id, contacts: contacts, layoutGeneration: session.layout.generation)))
         default:
             throw Failure("unknown script verb in “\(step)”")
         }
@@ -623,6 +643,13 @@ func runInputScript(_ script: String, on session: any RemoteSession, log: @escap
 func describe(_ curtain: Capability<any CurtainControl>) -> String {
     switch curtain {
     case .available(let control): control.isCurtained ? "up" : "available"
+    case .unavailable(let reason): "unavailable (\(reason))"
+    }
+}
+
+func describe(_ touch: Capability<TouchInput>) -> String {
+    switch touch {
+    case .available(let input): "up to \(input.maximumContacts) fingers"
     case .unavailable(let reason): "unavailable (\(reason))"
     }
 }

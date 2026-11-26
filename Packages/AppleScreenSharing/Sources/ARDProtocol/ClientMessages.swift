@@ -35,6 +35,9 @@ public enum ClientMessageType {
     public static let viewerInfo: UInt8 = 0x21
     /// Native file transfer; the Mac sends the same type.
     public static let fileTransfer: UInt8 = 0x22
+    /// A touch screen report for one of the Mac's displays (``ClientMessage/hidReport(display:report:)``).
+    /// A Mac lists it from macOS 27.3.
+    public static let hidReport: UInt8 = 0x26
 }
 
 /// The kinds of ``ClientMessageType/event2`` (the `u16` after the length and version).
@@ -444,6 +447,26 @@ public enum ClientMessage {
         writer.zeros(3)
         writer.u32(token)
         return writer.data
+    }
+
+    /// A HID input report for the virtual touch screen the Mac keeps for one of its displays,
+    /// `display` being the Mac's own id for it (a layout's screen id). Unlike every other message
+    /// its fields are little-endian, as Screen Sharing.app writes them (`RFBSendHIDReport`): `26 00`,
+    /// `u16` the length of what follows it (16 plus the report's), `u16` version 1, eight zero bytes,
+    /// `u32` the display, `u16` the report's length, the report.
+    public static func hidReport(display: UInt32, report: Data) -> Data {
+        precondition(report.count <= Int(UInt16.max) - 16, "HID report exceeds its length field")
+        var message = Data([ClientMessageType.hidReport, 0])
+        func littleEndian<T: FixedWidthInteger>(_ value: T) {
+            withUnsafeBytes(of: value.littleEndian) { message.append(contentsOf: $0) }
+        }
+        littleEndian(UInt16(16 + report.count))
+        littleEndian(UInt16(1))
+        message.append(Data(count: 8))
+        littleEndian(display)
+        littleEndian(UInt16(report.count))
+        message.append(report)
+        return message
     }
 
     /// Arms server-driven updates of a rectangle. `interval` paces them; zero means as fast as the

@@ -504,6 +504,7 @@ actor ARDEngine {
         if mode == .standard {
             core.setCurtainState(newLayout.curtainState)
         }
+        core.setOnConsole(newLayout.flags.contains(.onConsole))
 
         // With one screen selected the framebuffer is that screen alone.
         var screens = newLayout.screens
@@ -534,7 +535,9 @@ actor ARDEngine {
                 state: mode == .highPerformance ? .reconfiguring : .live,
                 frameInDesktop: frame, scale: screen.density * screen.serverScale
             ))
-            placements[id] = DisplayPlacement(originX: frame.x, originY: frame.y, scale: screen.density * screen.serverScale, serverScale: screen.serverScale)
+            placements[id] = DisplayPlacement(
+                originX: frame.x, originY: frame.y, scale: screen.density * screen.serverScale, serverScale: screen.serverScale, screen: screen.id
+            )
             legDisplays.append(id)
         }
 

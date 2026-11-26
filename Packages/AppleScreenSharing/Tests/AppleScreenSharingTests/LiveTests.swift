@@ -489,6 +489,58 @@ struct LiveAppleScreenSharingTests {
         }
     }
 
+    /// A Mac from macOS 27.3 takes a viewer's fingers as a touch screen of its own: a finger on the
+    /// Apple menu opens it, and Escape closes it again. In High Performance, whose pictures show a
+    /// menu at once where Standard mode on a virtual machine can miss it.
+    @Test func aFingerOnTheAppleMenuOpensIt() async throws {
+        let session = try await AppleScreenSharingBackend().connect(LiveHost.request(.require(.highPerformance), displays: LiveHost.smallDisplay))
+        guard session.capabilities.touch.isAvailable else {
+            await session.disconnect()
+            try Test.cancel("the Mac takes no touches: \(String(describing: session.capabilities.touch.unavailableReason))")
+        }
+        let display = try #require(session.layout.displays.first)
+        let frames = session.frames(for: display.id)
+        let before = Self.colours(of: try #require(await Self.settledFrame(from: frames, quiet: .seconds(2), limit: .seconds(20))))
+        // The Mac drops touches for 2 s after it reports its own pointer, as it does when a session starts.
+        try await Task.sleep(for: .seconds(1))
+        let apple = PixelPoint(x: 17 * display.scale, y: 11 * display.scale)
+        func finger(_ phase: TouchEvent.Contact.Phase) {
+            session.input.send(.touch(TouchEvent(display: display.id, contacts: [TouchEvent.Contact(id: 0, position: apple, phase: phase)], layoutGeneration: session.layout.generation)))
+        }
+        finger(.touching)
+        try await Task.sleep(for: .milliseconds(80))
+        finger(.lifted)
+        let open = Self.colours(of: try #require(await Self.settledFrame(from: frames, quiet: .seconds(1), limit: .seconds(10))))
+        // The menu covers the top left, under the menu bar.
+        let menu = (x: 0..<Int(150 * display.scale), y: Int(30 * display.scale)..<Int(200 * display.scale))
+        #expect(Self.difference(before, open, in: menu, width: display.pixelSize.width) > 20)
+
+        session.input.send(.key(KeyEvent(key: .escape, phase: .down)))
+        // Pressed and released back to back, Escape left the menu open.
+        try await Task.sleep(for: .milliseconds(40))
+        session.input.send(.key(KeyEvent(key: .escape, phase: .up)))
+        let closed = Self.colours(of: try #require(await Self.settledFrame(from: frames, quiet: .seconds(1), limit: .seconds(10))))
+        #expect(Self.difference(before, closed, in: menu, width: display.pixelSize.width) < 5)
+        await session.disconnect()
+    }
+
+    /// The mean difference of each colour component between two pictures, over a region.
+    private static func difference(_ first: [UInt8], _ second: [UInt8], in region: (x: Range<Int>, y: Range<Int>), width: Int) -> Double {
+        var total = 0.0
+        var count = 0
+        for y in region.y {
+            for x in region.x {
+                for component in 0..<3 {
+                    let index = (y * width + x) * 3 + component
+                    guard index < first.count, index < second.count else { continue }
+                    total += abs(Double(first[index]) - Double(second[index]))
+                    count += 1
+                }
+            }
+        }
+        return count == 0 ? 0 : total / Double(count)
+    }
+
     /// Peak signal-to-noise ratio between two pictures of the same size, in decibels.
     private static func similarity(_ first: [UInt8], _ second: [UInt8]) -> Double {
         precondition(first.count == second.count && !first.isEmpty)

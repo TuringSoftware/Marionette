@@ -32,8 +32,23 @@ public struct SessionCapabilities: Sendable {
     public var remoteActions: Capability<any RemoteActions> = .unavailable(.notSupportedByBackend)
     public var curtain: Capability<any CurtainControl> = .unavailable(.notSupportedByBackend)
     public var statistics: Capability<any SessionStatisticsSource> = .unavailable(.notSupportedByBackend)
+    /// Fingers go to the remote machine as they are (``InputEvent/touch(_:)``), as on a touch screen
+    /// of its own, instead of being turned into pointer input here.
+    public var touch: Capability<TouchInput> = .unavailable(.notSupportedByBackend)
 
     public init() {}
+}
+
+// MARK: - Touch
+
+/// What a remote machine's touch screen takes.
+public struct TouchInput: Sendable, Hashable {
+    /// The most fingers it follows at once. Further fingers are not sent.
+    public var maximumContacts: Int
+
+    public init(maximumContacts: Int) {
+        self.maximumContacts = maximumContacts
+    }
 }
 
 // MARK: - Clipboard

@@ -161,6 +161,10 @@ extension InputEvent {
     var key: KeyEvent? {
         if case .key(let event) = self { event } else { nil }
     }
+
+    var touch: TouchEvent? {
+        if case .touch(let event) = self { event } else { nil }
+    }
 }
 
 func tap(at point: ViewPoint, time: Double = 1) -> [[TouchSample]] {

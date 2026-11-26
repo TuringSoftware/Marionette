@@ -29,7 +29,8 @@ Where this document and a reference disagree, this document records what a Mac d
 
 ### Machines
 
-- A macOS 27 virtual machine (Apple Virtualization, one display, no GPU, host-only network).
+- A macOS 27 virtual machine (Apple Virtualization, one display, no GPU, host-only network); macOS
+  27.3 for touches.
 - A Mac mini with macOS 15.6 and two displays (6016 × 3384 and 5120 × 2880) on a LAN.
 - An Ubuntu 24.04 virtual machine running TigerVNC and wayshare.
 
@@ -49,6 +50,9 @@ marked.
 - **Static analysis**: `otool -tV` of `screensharingd` and `ScreensharingAgent`, and disassembly of
   ScreenSharing.framework from small helpers that load it. Marked where nothing was observed.
 - **Reference**: taken from a reference above and not checked independently.
+- **Apple's encoder**: UniversalHID.framework, which Screen Sharing.app uses to make touch reports,
+  called on a Mac to print its report descriptor and the reports it makes for given fingers (see
+  [Tools](#tools)).
 
 Captures of Apple's viewer back the test fixtures in `Packages/AppleScreenSharing/Tests`
 (file transfer, drag from the Mac, High Performance offers from macOS 26.6 and 27.0). A conformance
@@ -161,8 +165,9 @@ NAME is requesting permission to share your screen". No login key exists after t
   layout; observed values)*. A macOS 27 VM sent 2048 × 1536, 32-bit BGRX, flags `0x00000052`
   (may control, extended, two virtual displays) and a bitmap starting `bf f6 e7 2f ec …`.
 - The bitmap lists `0x1c` and `0x1d` when High Performance is offered, which it is on a virtual
-  machine too. The bitmap names `0x10` (encrypted input), `0x12` (`SetEncryption`) and `0x0c`
-  (curtain, only with Remote Management on).
+  machine too. The bitmap names `0x10` (encrypted input), `0x12` (`SetEncryption`), `0x0c`
+  (curtain, only with Remote Management on) and, from macOS 27.3, `0x26` (touches; fifth byte
+  `ee`).
 - The Mac mini sent 11136 × 3384 (both displays side by side), flags `0x52`, High Performance
   offered.
 
@@ -626,6 +631,48 @@ Mac took every kind without the viewer setting anything.
   movement did not navigate.
 - Momentum events (scroll phase 0, momentum 1/2/3) carry a scroll on after the fingers lift.
 
+### Touches (`0x26`)
+
+From macOS 27.3 a Mac takes a viewer's fingers as a touch screen of its own, and its apps show what
+they show for touches: holding a finger on a window's close button enlarges the three buttons, as
+on a touch screen. Screen Sharing.app sends them only when the server's bitmap lists `0x26`
+*(static analysis)*.
+
+- **For each display the agent keeps a virtual touch screen**, "V-Virtual Touch Display N" (vendor
+  `0x5ac`, product `0x8600`, usage page Digitizer, usage Touch Screen), made when a session starts
+  and again whenever the Mac's displays change, High Performance's virtual displays included *(Mac
+  log)*.
+- **The message** is little-endian, unlike every other one: `26 00`, `u16` the length of what follows
+  (16 plus the report's), `u16` version 1, eight zero bytes, `u32` the display, `u16` the report's
+  length, the report (`RFBSendHIDReport` in ScreenSharing.framework; `HandleHIDReport` in
+  `screensharingd`) *(static analysis, then observed)*. The display is the Mac's own id for it, a
+  layout's screen id: 1 for the VM's display, 3 or 4 for High Performance's virtual display.
+- **The report** is UniversalHID's digitizer report, ID 9, 58 bytes *(Apple's encoder; observed)*:
+
+  | Bytes | Field |
+  |---|---|
+  | 0 | Report ID, 9 |
+  | 1 | Contact count: slots in use |
+  | 2 | Contact count maximum, 5 |
+  | 3–27 | Five slots of 5 bytes: bits 0–4 the contact identifier (0–4), bit 5 resting (vendor usage `0xff1a`:`0xe0f2`), bit 6 touching, bit 7 in range; `u16` x and y, 0–65535 across the display |
+  | 28–39 | A scroll collection: 16 bits, `i8` x and y, two `i32` |
+  | 40–44 | One byte per slot, vendor usage `0xe0f4` (UniversalHID's "contact identity") |
+  | 45–52 | `u64`, vendor usage `0xff00`:`0x0102` (UniversalHID's "remote timestamp") |
+  | 53–57 | Seven groups of 5 bits, one bit per slot, vendor usages `0xe062`–`0xe068`: swipe pending, swipe locked, swipe up, down, left, right, cancelled; then 5 bits of padding |
+
+  A report lists every finger on the display; a finger that lifts is listed once more with touching
+  and in range clear. Reports with only the slots, counts and positions filled, everything else
+  zero, worked: a tap opened the Apple menu, a held finger enlarged a window's buttons, and two
+  fingers dragged down scrolled Terminal back.
+- **The daemon passes a report on only** when the viewer may control, the agent of the viewer's
+  session is the one on the console (a session of one's own gets none), and the Mac's own pointer
+  has not been reported for 2 s *(static analysis)*. The last applies at the start of every session,
+  when the agent reports the pointer's place: touches sent in the first 2 s were logged as received
+  and went no further. A viewer's own pointer events do not count: touches 0.5 s after one arrived.
+  Nothing tells the viewer a report was dropped.
+- Screen Sharing.app also withholds touches while it shows several displays combined in one window
+  *(static analysis)*.
+
 ## Clipboard
 
 - Text set from the viewer is what `pbpaste` prints on the Mac; text copied on the Mac (`pbcopy`) is
@@ -864,6 +911,12 @@ cannot verify the server, drops that first connection and connects again after C
 - The clear phase must be passed on byte for byte as it arrives: holding back a tail stalled session
   select, whose offer ends in zeros like the start of the rekey header.
 - A session-select answer has its credential block re-encrypted for the Mac's login.
+
+UniversalHID's report descriptor and reports come from Apple's own encoder: a small Swift program
+that declares `DigitizerReport`, `DigitizerContact` and `HIDReport` from the framework's exported
+symbols (each a `@frozen` struct around one `Data`) and calls them. The framework is private, so it
+links against a `.tbd` listing those symbols. `marionettectl session --script` has a `touch:` step
+for the Mac's side.
 
 Other `marionettectl` commands that help: `probe` (what a Mac says about itself), `session --trace
 --stats` (each set-up step and media event), `session --loss/--burst/--bandwidth/--delay` (seeded

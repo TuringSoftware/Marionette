@@ -109,6 +109,8 @@ struct DisplayPlacement: Sendable {
     var scale: Double
     /// Server-side scaling in force; the Mac reads pointer positions in unscaled pixels.
     var serverScale: Double
+    /// The Mac's own id for the display, which touches are addressed to.
+    var screen: UInt32
 }
 
 /// State and plumbing shared by a session's public face, its engine, its capabilities and the
@@ -117,6 +119,13 @@ final class ARDSessionCore: Sendable, InputSink {
     enum KeyIdentity: Hashable {
         case position(KeyCode)
         case symbol(UInt32)
+    }
+
+    /// What a move that may replace an earlier one moves: only a move of the same kind does.
+    enum MoveKind {
+        case pointer
+        /// The same fingers, all still touching.
+        case touch
     }
 
     struct Shared {
@@ -161,6 +170,10 @@ final class ARDSessionCore: Sendable, InputSink {
         var isControlRefused = false
         /// Curtain mode as the latest layout tells it; `nil` before the first.
         var curtainState: DisplayLayout.CurtainState?
+        /// The latest layout says the session is on the Mac's own screen, not one of its own.
+        var isOnConsole = false
+        /// The fingers on the Mac's touch screen as the last report left them; `nil` when none.
+        var touches: (screen: UInt32, contacts: [DigitizerReport.Contact])?
         /// Input is held until the later of these: the Mac discards it for a while after a login,
         /// and after a High Performance display change.
         var inputHeldUntil: ContinuousClock.Instant
@@ -168,8 +181,8 @@ final class ARDSessionCore: Sendable, InputSink {
         var inputOpensAt: ContinuousClock.Instant { max(inputHeldUntil, displayChangeHoldUntil ?? inputHeldUntil) }
         /// Input sealed-in-order but not yet sent, while the Mac is not taking input.
         var heldInput: [Data] = []
-        /// The latest pointer move, waiting for a backed-up connection to drain.
-        var pendingMove: Data?
+        /// The latest pointer or touch move, waiting for a backed-up connection to drain.
+        var pendingMove: (message: Data, kind: MoveKind)?
         var moveFlush: Task<Void, Never>?
         var inputFlush: Task<Void, Never>?
         /// Closes the connection once the session has ended; ``ARDSessionCore/closed()`` waits for it.
@@ -352,7 +365,7 @@ final class ARDSessionCore: Sendable, InputSink {
 
     func send(_ event: InputEvent) {
         var messages: [Data] = []
-        var isMove = false
+        var move: MoveKind?
         shared.withLock { shared in
             guard !shared.state.isDisconnected, !shared.isSuspended, shared.controlMode != .observe else { return }
             switch event {
@@ -396,7 +409,7 @@ final class ARDSessionCore: Sendable, InputSink {
                     break
                 }
                 shared.lastPointer = position
-                isMove = pointer.buttons == shared.buttonsDown
+                move = pointer.buttons == shared.buttonsDown ? .pointer : nil
                 shared.buttonsDown = pointer.buttons
                 messages.append(pointerMessage(buttonMask: AppleButtonMask.encode(pointer.buttons), x: position.x, y: position.y, &shared))
                 if !shared.cursor.isCompositedInFrames, let placement = shared.placements[pointer.display] {
@@ -453,11 +466,33 @@ final class ARDSessionCore: Sendable, InputSink {
                       let position = Self.wirePosition(gesture.position, on: gesture.display, in: shared)
                 else { return }
                 messages.append(contentsOf: Self.gestureMessages(gesture, x: position.x, y: position.y))
+            case .touch(let touch):
+                guard shared.capabilities.touch.isAvailable else { return }
+                guard touch.layoutGeneration == shared.layout.generation,
+                      let placement = shared.placements[touch.display],
+                      let frame = shared.layout[touch.display]?.frameInDesktop
+                else {
+                    // Fingers on displays that no longer exist mean nothing; the ones still down
+                    // where they last were are let go, or they would stay down on the Mac.
+                    messages = releaseTouches(&shared)
+                    return
+                }
+                if let held = shared.touches, held.screen != placement.screen {
+                    messages = releaseTouches(&shared)
+                }
+                let contacts = Self.digitizerContacts(touch.contacts, in: frame)
+                guard !contacts.isEmpty else { return }
+                let down = contacts.filter(\.isTouching)
+                if let held = shared.touches, down.count == contacts.count, down.map(\.identifier) == held.contacts.map(\.identifier) {
+                    move = .touch
+                }
+                shared.touches = down.isEmpty ? nil : (placement.screen, down)
+                messages.append(ClientMessage.hidReport(display: placement.screen, report: DigitizerReport(contacts: contacts).data))
             case .releaseAll:
                 messages = releaseEverything(&shared)
             }
         }
-        deliverInput(messages, isMove: isMove)
+        deliverInput(messages, move: move)
         if case .pointer = event {
             cursorUpdates.send(shared.withLock { $0.cursor })
         }
@@ -474,26 +509,27 @@ final class ARDSessionCore: Sendable, InputSink {
 
     /// Sends input messages now, or holds them until the Mac takes input. Order is kept either way.
     ///
-    /// A pointer move while the connection is backed up (a stalled TCP path) replaces the move
-    /// before it that has not gone out yet: the Mac would otherwise replay the whole old path once
-    /// the path clears. Presses, releases, keys and gestures are never dropped, and a waiting move
-    /// goes out ahead of them.
-    private func deliverInput(_ messages: [Data], isMove: Bool = false) {
+    /// A pointer or touch move while the connection is backed up (a stalled TCP path) replaces the
+    /// move of the same kind before it that has not gone out yet: the Mac would otherwise replay the
+    /// whole old path once the path clears. Presses, releases, fingers landing or lifting, keys and
+    /// gestures are never dropped, and a waiting move goes out ahead of them.
+    private func deliverInput(_ messages: [Data], move: MoveKind? = nil) {
         guard !messages.isEmpty else { return }
         let now = ContinuousClock.now
         let backlog = connection.queuedBytes
         let sendNow: [Data] = shared.withLock { shared in
             if now >= shared.inputOpensAt {
-                if isMove, backlog >= Self.inputBacklogLimit {
-                    shared.pendingMove = messages.last
+                if let move, backlog >= Self.inputBacklogLimit, let last = messages.last {
+                    let other = shared.pendingMove.flatMap { $0.kind == move ? nil : $0.message }
+                    shared.pendingMove = (last, move)
                     scheduleMoveFlush(&shared)
-                    return []
+                    return other.map { [$0] } ?? []
                 }
                 defer {
                     shared.heldInput.removeAll()
                     shared.pendingMove = nil
                 }
-                return shared.heldInput + (shared.pendingMove.map { [$0] } ?? []) + messages
+                return shared.heldInput + (shared.pendingMove.map { [$0.message] } ?? []) + messages
             }
             shared.heldInput.append(contentsOf: messages)
             scheduleInputFlush(&shared)
@@ -530,7 +566,7 @@ final class ARDSessionCore: Sendable, InputSink {
                 guard !shared.state.isDisconnected, let move = shared.pendingMove else { return }
                 shared.pendingMove = nil
                 // Inside the lock, so nothing sent meanwhile can overtake it.
-                self.connection.send(move)
+                self.connection.send(move.message)
             }
         }
     }
@@ -645,7 +681,40 @@ final class ARDSessionCore: Sendable, InputSink {
             shared.buttonsDown = []
             messages.append(pointerMessage(buttonMask: 0, x: shared.lastPointer.x, y: shared.lastPointer.y, &shared))
         }
+        messages += releaseTouches(&shared)
         return messages
+    }
+
+    /// Takes every finger still down off the Mac's touch screen, as cancelled: what they started
+    /// is abandoned rather than finished.
+    private func releaseTouches(_ shared: inout Shared) -> [Data] {
+        guard let held = shared.touches else { return [] }
+        shared.touches = nil
+        let contacts = held.contacts.map { contact in
+            var contact = contact
+            contact.isTouching = false
+            contact.isInRange = false
+            contact.isCancelled = true
+            return contact
+        }
+        return [ClientMessage.hidReport(display: held.screen, report: DigitizerReport(contacts: contacts).data)]
+    }
+
+    /// Fingers as a Mac's touch screen reads them: positions as fractions of the display, at most
+    /// as many fingers as it follows, each by an identifier it can hold.
+    static func digitizerContacts(_ contacts: [TouchEvent.Contact], in frame: PixelRect) -> [DigitizerReport.Contact] {
+        let ids = 0..<DigitizerReport.maximumContacts
+        let width = Double(max(frame.width - 1, 1))
+        let height = Double(max(frame.height - 1, 1))
+        var result: [DigitizerReport.Contact] = []
+        for contact in contacts where ids.contains(contact.id) && result.count < DigitizerReport.maximumContacts {
+            let x = DigitizerReport.Contact.scaled(contact.position.x / width)
+            let y = DigitizerReport.Contact.scaled(contact.position.y / height)
+            result.append(DigitizerReport.Contact(
+                identifier: UInt8(contact.id), isTouching: contact.phase == .touching, isCancelled: contact.phase == .cancelled, x: x, y: y
+            ))
+        }
+        return result
     }
 
     /// The microseconds since the key or pointer event before this one, as an encrypted event
@@ -972,16 +1041,21 @@ final class ARDSessionCore: Sendable, InputSink {
     /// The Mac's word on whether it takes this viewer's input. Without it the control capability is
     /// withdrawn, so a front end can say so instead of sending input that goes nowhere.
     func setRemoteControlAllowed(_ allowed: Bool) {
-        let capabilities: SessionCapabilities? = shared.withLock { shared in
+        let update: (capabilities: SessionCapabilities, release: [Data])? = shared.withLock { shared in
             guard !shared.state.isDisconnected, shared.isControlRefused == allowed else { return nil }
             shared.isControlRefused = !allowed
             shared.capabilities.control = allowed && serverInit.flags?.contains(.observeOnly) != true
                 ? .available(ARDControl(core: self))
                 : .unavailable(.notPermitted)
             shared.capabilities.curtain = curtainCapability(for: shared)
-            return shared.capabilities
+            shared.capabilities.touch = touchCapability(for: shared)
+            // Touches stop being sent here, so fingers still down are let go now.
+            let release = shared.capabilities.touch.isAvailable ? [] : releaseTouches(&shared)
+            return (shared.capabilities, release)
         }
-        guard let capabilities else { return }
+        guard let update else { return }
+        deliverInput(update.release)
+        let capabilities = update.capabilities
         note(allowed ? "the Mac takes this viewer's input again" : "the Mac takes no input from this viewer")
         events.send(.capabilitiesChanged(capabilities))
     }
@@ -998,6 +1072,30 @@ final class ARDSessionCore: Sendable, InputSink {
         guard let capabilities else { return }
         note("curtain mode: \(state)")
         events.send(.capabilitiesChanged(capabilities))
+    }
+
+    /// Whether the session is on the Mac's own screen, as a layout tells it.
+    func setOnConsole(_ isOnConsole: Bool) {
+        let update: (capabilities: SessionCapabilities, release: [Data])? = shared.withLock { shared in
+            guard !shared.state.isDisconnected, shared.isOnConsole != isOnConsole else { return nil }
+            shared.isOnConsole = isOnConsole
+            shared.capabilities.touch = touchCapability(for: shared)
+            let release = shared.capabilities.touch.isAvailable ? [] : releaseTouches(&shared)
+            return (shared.capabilities, release)
+        }
+        guard let update else { return }
+        deliverInput(update.release)
+        events.send(.capabilitiesChanged(update.capabilities))
+    }
+
+    /// Touches, where the Mac takes them (macOS 27.3 and later lists ``ClientMessageType/hidReport``).
+    /// It passes them on only for a session on its own screen, in High Performance as well; a
+    /// session of one's own gets none.
+    func touchCapability(for shared: Shared) -> Capability<TouchInput> {
+        guard serverInit.acceptedMessages?.contains(ClientMessageType.hidReport) == true else { return .unavailable(.notSupportedByServer) }
+        guard !shared.isControlRefused, serverInit.flags?.contains(.observeOnly) != true else { return .unavailable(.notPermitted) }
+        guard shared.isOnConsole else { return .unavailable(.notSupportedByServer) }
+        return .available(TouchInput(maximumContacts: DigitizerReport.maximumContacts))
     }
 
     /// Curtain mode, offered where the Mac offers it. A Mac does so only for a session on its own

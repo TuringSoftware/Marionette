@@ -571,6 +571,7 @@ public final class ARDSession: RemoteSession {
             shared.capabilities = makeCapabilities()
             // Settled by the first layout.
             shared.capabilities.curtain = core.curtainCapability(for: shared)
+            shared.capabilities.touch = core.touchCapability(for: shared)
         }
         await engine.start()
         let task = Task { [engine] in await engine.run() }

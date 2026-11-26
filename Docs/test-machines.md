@@ -17,7 +17,8 @@ Any Mac serves: a virtual machine (UTM with Apple Virtualization works) or a rea
   host's load before trusting a timing.
 
 A VM stands in for a real Mac in most things, High Performance and two virtual displays included.
-These need a real Mac:
+Touches need macOS 27.3 or later; on an earlier Mac the touch test cancels itself. These need a real
+Mac:
 
 - two physical displays, and virtual displays larger than a VM accepts;
 - the Mac's own pointer position on a Mac with a GPU (see the protocol reference's open questions);

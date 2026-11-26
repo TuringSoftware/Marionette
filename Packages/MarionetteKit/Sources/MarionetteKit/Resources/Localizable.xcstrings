@@ -166,7 +166,7 @@
     "Turn on Marionette." : {},
     "Turn on Remote Login." : {},
     "Turn on Screen Sharing." : {},
-    "typed “%@”, %lld key presses, %lld clicks, %lld secondary clicks, %lld scrolls" : {},
+    "typed “%@”, %lld key presses, %lld clicks, %lld secondary clicks, %lld scrolls, %lld touches" : {},
     "Unexpected Response" : {},
     "Unsupported Computer" : {},
     "Untitled" : {},

@@ -223,6 +223,9 @@ final class ScriptedMac: Sendable {
         var takesEncryptedInput = true
         /// Refuse control in the initialisation's flags: the viewer may only watch.
         var isObserveOnly = false
+        /// Name ``ClientMessageType/hidReport`` among the messages the Mac takes, as macOS 27.3 does:
+        /// a viewer may then send touches.
+        var takesTouches = false
         /// The folder under a viewer's drag when it is let go, which the Mac then names. `nil` for
         /// something that takes no files (an app's window, the Dock): the Mac says nothing at all.
         var dropFolder: String? = "/Users/tester/Desktop"
@@ -285,6 +288,8 @@ final class ScriptedMac: Sendable {
         case drag(token: UInt32, names: [String])
         /// A request for what the drag held on the Mac carries (`0x0e`).
         case dragRequest(token: UInt32)
+        /// A touch screen report for the display with the Mac's id `display`.
+        case touch(display: UInt32, report: DigitizerReport)
     }
 
     /// A key or pointer event that came as an `EncryptedInputEvent`, with what the plain form
@@ -671,6 +676,19 @@ final class ScriptedMac: Sendable {
         case ClientMessageType.dragRequest:
             try reader.skip(3)
             return .dragRequest(token: try reader.u32())
+        case ClientMessageType.hidReport:
+            // Little-endian, unlike everything else.
+            try reader.skip(1)
+            let header = try reader.take(18)
+            func littleEndian(_ offset: Int, _ count: Int) -> Int {
+                (0..<count).reduce(0) { $0 | Int(header[header.startIndex + offset + $1]) << (8 * $1) }
+            }
+            let length = littleEndian(0, 2)
+            let reportLength = littleEndian(16, 2)
+            guard littleEndian(2, 2) == 1, length == 16 + reportLength else {
+                throw .malformed("HID report message of length \(length), version \(littleEndian(2, 2)), report \(reportLength)")
+            }
+            return .touch(display: UInt32(littleEndian(12, 4)), report: try DigitizerReport.parse(try reader.take(reportLength)))
         default:
             throw .malformed("viewer message type \(type)")
         }
@@ -955,7 +973,9 @@ final class ScriptedMac: Sendable {
             // Message 0x10 is the first bit of the third byte.
             // Message 0x12, SetEncryption, is the third bit of the third byte.
             let third: UInt8 = (options.takesEncryptedInput ? 0xe7 : 0x67) & (options.stripsSetEncryption ? ~0x20 : 0xff)
-            nameField.bytes(Data([0xbf, 0xf6, third, 0x2f, 0xec] + [UInt8](repeating: 0, count: 11)))
+            // Message 0x26, HIDReport, is the seventh bit of the fifth byte.
+            let fifth: UInt8 = 0xec | (options.takesTouches ? 0x02 : 0)
+            nameField.bytes(Data([0xbf, 0xf6, third, 0x2f, fifth] + [UInt8](repeating: 0, count: 11)))
         }
         nameField.bytes(Data(options.name.utf8))
         initialisation.u32(UInt32(nameField.data.count))

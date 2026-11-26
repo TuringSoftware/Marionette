@@ -256,3 +256,72 @@ import Testing
         model.disconnect()
     }
 }
+
+/// Touch mode on a remote machine that takes touches: fingers go to it as they are, and nothing
+/// here turns them into clicks.
+@MainActor
+@Suite struct DirectTouchInputTests {
+    private static func fixture(touchContacts: Int) throws -> Fixture {
+        var scenario = fastScenario()
+        scenario.touchContacts = touchContacts
+        return try Fixture([scenario])
+    }
+
+    private static func touch(_ model: SessionModel, _ id: Int, _ phase: TouchSample.Phase, _ x: Double, _ y: Double) {
+        model.handleTouches([TouchSample(id: id, phase: phase, location: ViewPoint(x: x, y: y), timestamp: 0)], on: .stage)
+    }
+
+    @Test func aTapIsAFingerOnTheRemoteScreenNotAClick() async throws {
+        let fixture = try Self.fixture(touchContacts: 5)
+        let model = try await fixture.connectedModel()
+        let session = fixture.backend.sessions[0]
+        #expect(model.features.touch == TouchInput(maximumContacts: 5))
+        #expect(model.uiState.inputMode == .touch)
+        Self.touch(model, 1, .began, 100, 100)
+        Self.touch(model, 2, .began, 120, 100)
+        Self.touch(model, 1, .ended, 100, 100)
+        Self.touch(model, 2, .ended, 120, 100)
+        let touches: [TouchEvent] = session.receivedInput.compactMap(\.touch)
+        let phases: [[TouchEvent.Contact.Phase]] = touches.map { $0.contacts.map(\.phase) }
+        #expect(phases == [[.touching], [.touching, .touching], [.lifted, .touching], [.lifted]])
+        #expect(touches.map { $0.contacts.map(\.id) } == [[0], [0, 1], [0, 1], [1]])
+        #expect(session.receivedInput.compactMap(\.pointer).isEmpty)
+        #expect(model.inputTally.touches == 2)
+        #expect(model.inputTally.clicks == 0)
+        model.disconnect()
+    }
+
+    @Test func trackpadModeAndAMachineWithoutTouchesKeepPointerInput() async throws {
+        let fixture = try Self.fixture(touchContacts: 5)
+        let model = try await fixture.connectedModel()
+        let session = fixture.backend.sessions[0]
+        model.setInputMode(.trackpad)
+        Self.touch(model, 1, .began, 100, 100)
+        Self.touch(model, 1, .ended, 100, 100)
+        try await waitUntil { !session.receivedInput.compactMap(\.pointer).isEmpty }
+        #expect(session.receivedInput.compactMap(\.touch).isEmpty)
+        model.disconnect()
+
+        let plainFixture = try Self.fixture(touchContacts: 0)
+        let plain = try await plainFixture.connectedModel()
+        let plainSession = plainFixture.backend.sessions[0]
+        #expect(plain.features.touch == nil)
+        Self.touch(plain, 1, .began, 100, 100)
+        Self.touch(plain, 1, .ended, 100, 100)
+        #expect(plainSession.receivedInput.compactMap(\.pointer).contains { $0.buttons == .primary })
+        #expect(plainSession.receivedInput.compactMap(\.touch).isEmpty)
+        plain.disconnect()
+    }
+
+    /// Switching to the trackpad with a finger down lets the finger go on the remote machine.
+    @Test func changingModeWithAFingerDownCancelsIt() async throws {
+        let fixture = try Self.fixture(touchContacts: 5)
+        let model = try await fixture.connectedModel()
+        let session = fixture.backend.sessions[0]
+        Self.touch(model, 1, .began, 100, 100)
+        model.setInputMode(.trackpad)
+        let last: [TouchEvent.Contact.Phase]? = session.receivedInput.compactMap(\.touch).last?.contacts.map(\.phase)
+        #expect(last == [.cancelled])
+        model.disconnect()
+    }
+}

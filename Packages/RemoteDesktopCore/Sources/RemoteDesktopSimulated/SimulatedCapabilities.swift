@@ -54,6 +54,13 @@ extension SimulatedSessionCore {
             ? .unavailable(.requiresMode(.standard))
             : .available(SimulatedCurtain(core: self, isCurtained: false))
         capabilities.statistics = .available(SimulatedStatistics(core: self))
+        if scenario.touchContacts == 0 {
+            capabilities.touch = .unavailable(.notSupportedByServer)
+        } else if options.controlMode == .observe {
+            capabilities.touch = .unavailable(.notPermitted)
+        } else {
+            capabilities.touch = .available(TouchInput(maximumContacts: scenario.touchContacts))
+        }
         return capabilities
     }
 }

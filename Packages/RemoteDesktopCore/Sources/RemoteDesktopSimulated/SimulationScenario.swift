@@ -101,6 +101,9 @@ public struct SimulationScenario: Sendable {
     public var transferRate = 512 * 1024
     /// Drags of files to and from the machine. `nil` plays a server that knows none (plain VNC).
     public var fileDrags: FileDrags? = FileDrags()
+    /// The most fingers the machine takes as a touch screen of its own; 0 for none, as before
+    /// macOS 27.3.
+    public var touchContacts = 0
     /// Produce a continuous test tone on the audio capability.
     public var playsTone = true
     /// Whether the session reports itself encrypted (``SessionInfo/isEncrypted``), as Apple's
