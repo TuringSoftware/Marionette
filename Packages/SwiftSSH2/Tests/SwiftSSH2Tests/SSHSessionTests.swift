@@ -1,6 +1,7 @@
 // Copyright © 2026 Turing Software, LLC
 // SPDX-License-Identifier: Apache-2.0
 
+import CryptoKit
 import Foundation
 @testable import SwiftSSH2
 import SwiftSSH2TestSupport
@@ -41,6 +42,40 @@ import Testing
         let result = try await session.run("echo logged-in")
         #expect(String(decoding: result.standardOutput, as: UTF8.self) == "logged-in\n")
         await session.disconnect()
+    }
+
+    @Test func logsInWithAKeyItCannotSee() async throws {
+        let key = P256.Signing.PrivateKey()
+        var publicKey = Data()
+        for field in [Data("ecdsa-sha2-nistp256".utf8), Data("nistp256".utf8), key.publicKey.x963Representation] {
+            withUnsafeBytes(of: UInt32(field.count).bigEndian) { publicKey.append(contentsOf: $0) }
+            publicKey.append(field)
+        }
+        try server.authorize("ecdsa-sha2-nistp256 \(publicKey.base64EncodedString()) signer")
+        let signed = Mutex(0)
+        let session = try await server.connect()
+        try await session.authenticate(username: try server.username, with: .signer(publicKey: publicKey) { data in
+            signed.withLock { $0 += 1 }
+            return SSHAuthentication.ecdsaSignature(raw: try! key.signature(for: data).rawRepresentation)
+        })
+        #expect(await session.isAuthenticated)
+        #expect(signed.withLock { $0 } == 1)
+        await session.disconnect()
+
+        let refusing = try await server.connect()
+        await #expect(throws: SSHError.authenticationFailed) {
+            try await refusing.authenticate(username: try server.username, with: .signer(publicKey: publicKey) { _ in nil })
+        }
+        await refusing.disconnect()
+    }
+
+    @Test func ecdsaSignaturesAreMinimalMPInts() {
+        var raw = Data(repeating: 0, count: 64)
+        raw[1] = 0x7F
+        raw[32] = 0x80
+        let blob = SSHAuthentication.ecdsaSignature(raw: raw)
+        #expect(blob.prefix(4) == Data([0, 0, 0, 31]) && blob[4] == 0x7F)
+        #expect(blob.dropFirst(35).prefix(5) == Data([0, 0, 0, 33, 0]) && blob[blob.startIndex + 40] == 0x80)
     }
 
     @Test func passphraseProtectedKey() async throws {

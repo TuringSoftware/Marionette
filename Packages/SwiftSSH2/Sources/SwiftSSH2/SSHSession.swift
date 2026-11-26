@@ -84,6 +84,33 @@ public enum SSHAuthentication: Sendable {
     case privateKey(Data, passphrase: String?)
     /// The server asks questions and the responder answers them, one answer per prompt.
     case keyboardInteractive(@Sendable (SSHKeyboardInteractiveChallenge) async -> [String])
+    /// A key whose private half is kept elsewhere, such as in a Secure Enclave. `publicKey` is the
+    /// public key in SSH wire format; `sign` returns the signature of the data it is given, in the
+    /// form the key's algorithm defines inside SSH's signature blob (for ECDSA,
+    /// ``ecdsaSignature(raw:)``), or `nil` to refuse. It is called on the session's queue and may
+    /// block it.
+    case signer(publicKey: Data, sign: @Sendable (Data) -> Data?)
+
+    /// An ECDSA signature as SSH carries it, from the raw form (`r` then `s`, each the curve's
+    /// size) that CryptoKit produces.
+    public static func ecdsaSignature(raw: Data) -> Data {
+        let half = raw.count / 2
+        var blob = Data()
+        for part in [raw.prefix(half), raw.suffix(half)] {
+            // An mpint: big-endian, no leading zeros, and a zero in front when the top bit is set.
+            var bytes = Data(part.drop { $0 == 0 })
+            if let first = bytes.first, first & 0x80 != 0 { bytes.insert(0, at: 0) }
+            withUnsafeBytes(of: UInt32(bytes.count).bigEndian) { blob.append(contentsOf: $0) }
+            blob.append(bytes)
+        }
+        return blob
+    }
+}
+
+/// Carries a signer into libssh2's signing callback.
+private final class SignerBox {
+    let sign: @Sendable (Data) -> Data?
+    init(_ sign: @escaping @Sendable (Data) -> Data?) { self.sign = sign }
 }
 
 /// A pointer libssh2 handed out. Only ever dereferenced by libssh2, on the owning session's queue.
@@ -570,6 +597,29 @@ public final class SSHSession: @unchecked Sendable {
                     libssh2_userauth_publickey_frommemory(
                         pointer, username, username.utf8.count, nil, 0,
                         bytes.bindMemory(to: CChar.self).baseAddress, bytes.count, passphrase
+                    )
+                }
+            case .signer(let publicKey, let sign):
+                // The callback runs within the call, so the box lives exactly as long as it.
+                let box = Unmanaged.passRetained(SignerBox(sign))
+                defer { box.release() }
+                var abstract: UnsafeMutableRawPointer? = box.toOpaque()
+                status = publicKey.withUnsafeBytes { bytes in
+                    libssh2_userauth_publickey(
+                        pointer, username, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count,
+                        { _, signature, signatureLength, data, dataLength, abstract in
+                            guard let owner = abstract?.pointee, let signature, let signatureLength, let data else { return -1 }
+                            let box = Unmanaged<SignerBox>.fromOpaque(owner).takeUnretainedValue()
+                            guard let signed = box.sign(Data(bytes: data, count: dataLength)), !signed.isEmpty,
+                                  let buffer = malloc(signed.count)?.assumingMemoryBound(to: UInt8.self)
+                            else { return -1 }
+                            // libssh2 frees it with its allocator, which is malloc's.
+                            signed.copyBytes(to: buffer, count: signed.count)
+                            signature.pointee = buffer
+                            signatureLength.pointee = signed.count
+                            return 0
+                        },
+                        &abstract
                     )
                 }
             case .keyboardInteractive:

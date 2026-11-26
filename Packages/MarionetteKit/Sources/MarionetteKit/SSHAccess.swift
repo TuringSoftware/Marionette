@@ -125,8 +125,11 @@ public struct SSHServices: Sendable {
     ///
     /// `presetPassword` is tried before the user is asked for one: a password the user already
     /// typed this session for the same account (the remote-desktop one, for file access).
+    ///
+    /// A key that requires the device owner is unlocked through `access`, which a session shares
+    /// with its saved password so that the owner is asked once.
     public func open(
-        _ target: SSHTarget, prompts: any PromptHandler, presetPassword: String? = nil, purpose: PromptContext? = nil
+        _ target: SSHTarget, prompts: any PromptHandler, access: SecretAccess, presetPassword: String? = nil, purpose: PromptContext? = nil
     ) async throws(SSHConnectionError) -> any SSHSessionHandle {
         if Task.isCancelled { throw .cancelled }
         var username = target.username.trimmingCharacters(in: .whitespaces)
@@ -142,11 +145,18 @@ public struct SSHServices: Sendable {
         }
 
         var login = SSHLogin(server: target.server, username: username, purpose: purpose)
-        if let keyName = target.keyName, let key = try? keys.privateKey(named: keyName) {
-            // A key that has been deleted is simply not offered; the password remains.
-            login.privateKey = key
+        if let keyName = target.keyName {
+            // A key that has been deleted, or that the owner did not unlock, is simply not offered;
+            // the password remains.
+            let reason = String(localized: "Sign in to “\(target.server.host)” with the key “\(keyName)”.", bundle: #bundle)
+            switch await keys.loginKey(named: keyName, access: access, reason: reason) {
+            case .file(let key): login.privateKey = key
+            case .signer(let signer): login.signer = signer
+            case nil: break
+            }
             login.keyName = keyName
         }
+        if Task.isCancelled { throw .cancelled }
         let asking: any PromptHandler = preset.map { PresetPasswordPrompts(base: prompts, preset: $0) } ?? prompts
         let handle: any SSHSessionHandle
         do {
@@ -257,7 +267,8 @@ public final class ScriptedSSHConnector: SSHConnecting {
         )
         /// Fails every connection before the host key is seen.
         public var failure: SSHConnectionError?
-        /// Private keys that log in, with the passphrase each needs (`nil` for none).
+        /// Private keys that log in, with the passphrase each needs (`nil` for none). A key that
+        /// signs where it is kept is listed by its public key, with `nil`.
         public var authorizedKeys: [Data: String?] = [:]
         /// The password that logs in, if passwords are accepted.
         public var password: String?
@@ -353,6 +364,9 @@ public final class ScriptedSSHConnector: SSHConnecting {
         let context = login.promptContext
         if server.authorizedKeys.isEmpty, server.password == nil, server.keyboardInteractive == nil { return }
 
+        if let signer = login.signer, server.authorizedKeys[signer.publicKey] != nil, signer.sign(Data("challenge".utf8)) != nil {
+            return
+        }
         if let key = login.privateKey, !server.authorizedKeys.isEmpty {
             if let needed = server.authorizedKeys[key] {
                 var passphrase: String?

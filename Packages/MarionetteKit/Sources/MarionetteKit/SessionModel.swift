@@ -46,6 +46,8 @@ public final class SessionModel: Identifiable {
         public var clipboardPollInterval: Duration = .seconds(1)
         /// How long the handle of a collapsed control strip stays before it fades; `nil` keeps it.
         public var controlsHandleTimeout: Duration? = .seconds(4)
+        /// Asks the device owner before protected secrets are used.
+        public var owner: OwnerAuthentication = .simulated
 
         public init(
             ladder: ConnectionLadder,
@@ -230,7 +232,7 @@ public final class SessionModel: Identifiable {
         padGestures.forwardsGestures = true
         deckTrackpad = TrackpadInterpreter(configuration: padGestures, zoomAnchor: .pointer)
         pointerInterpreter = PointerInterpreter(configuration: gestures)
-        prompts = PromptBroker(computer: computer, secrets: dependencies.secrets)
+        prompts = PromptBroker(computer: computer, secrets: dependencies.secrets, access: dependencies.owner.makeAccess())
         clipboard = ClipboardBridge(
             mode: preferences.clipboardMode,
             pasteboard: dependencies.pasteboard,
@@ -468,10 +470,10 @@ public final class SessionModel: Identifiable {
         dependencies.repository?.recordConnection(id: computer.id, mode: session.info.mode, at: dependencies.clock.now)
         if session.info.isServerAuthenticated, computer.backendID == BackendID.appleScreenSharing,
            dependencies.repository?.record(id: computer.id) != nil {
-            try? dependencies.secrets.setSecret("1", for: .provenIdentity(for: computer))
+            try? dependencies.secrets.setSecret("1", for: .provenIdentity(for: computer), protection: computer.passwordProtection.withoutUserPresence)
         }
         if session.info.isEncrypted, dependencies.repository?.record(id: computer.id) != nil {
-            try? dependencies.secrets.setSecret("1", for: .encryptedBefore(for: computer))
+            try? dependencies.secrets.setSecret("1", for: .encryptedBefore(for: computer), protection: computer.passwordProtection.withoutUserPresence)
         }
         if isInBackground {
             // Reconnected while the app is away: nothing may draw or play until it is back.
@@ -799,6 +801,8 @@ public final class SessionModel: Identifiable {
 
     public func sceneDidEnterBackground() {
         isInBackground = true
+        // Whoever has the device next must pass Face ID again before protected secrets are used.
+        prompts.lockProtectedSecrets()
         // Already stopped when the app resigned active; this covers a path that skipped that.
         renderer.suspendDrawing()
         externalRenderer.suspendDrawing()

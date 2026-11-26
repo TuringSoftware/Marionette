@@ -60,6 +60,19 @@ public struct ComputerConfiguration: Sendable, Hashable, Codable, Identifiable {
     // before them still decode; each has its default behind it.
     private var retina: Bool?
     private var secondDisplay: Bool?
+    private var passwordStorage: SecretProtection?
+
+    /// How the computer's saved passwords are kept (the remote-desktop one and its SSH ones), and
+    /// the marks kept beside them. Never in iCloud Keychain, since the computer is not either.
+    public var passwordProtection: SecretProtection {
+        get { passwordStorage ?? .standard }
+        set {
+            var protection = newValue
+            protection.synchronizes = false
+            // The default is stored as none, so that choosing it again is no change.
+            passwordStorage = protection == .standard ? nil : protection
+        }
+    }
 
     /// Fit This Device: ask for a Retina (2x) display wherever the Mac makes one for the pane's
     /// shape, the picture then scaled to fit; off, a 1x display of the device's own pixels.

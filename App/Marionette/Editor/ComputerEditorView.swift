@@ -8,8 +8,9 @@ import MarionetteKit
 /// sections that open on demand, because most people never need them.
 struct ComputerEditorView: View {
     @Bindable var model: ComputerEditorModel
-    /// The SSH keys a tunnel can sign in with.
+    /// The SSH keys a tunnel can sign in with, and the servers it trusts.
     let sshKeys: SSHKeyStore
+    let hostKeys: any KnownHostsStore
     /// Called with the saved configuration, or `nil` when the user cancelled.
     var onFinish: (ComputerConfiguration?) -> Void
     var onDelete: () -> Void
@@ -18,6 +19,9 @@ struct ComputerEditorView: View {
     @State private var showsTunnel = false
     @State private var showsDisplay = false
     @State private var showsAudio = false
+    @State private var showsPasswordSecurity = false
+    @State private var showsSSHKeys = false
+    @State private var ownerCheck = OwnerCheck.unavailable
     @State private var confirmsDiscard = false
     @State private var confirmsDelete = false
     @State private var keyNames: [String] = []
@@ -25,6 +29,8 @@ struct ComputerEditorView: View {
 
     private enum Field: Hashable {
         case address
+        case password
+        case tunnelPassword
     }
 
     var body: some View {
@@ -32,6 +38,7 @@ struct ComputerEditorView: View {
             Form {
                 basics
                 signIn
+                passwordSecurity
                 connection
                 tunnel
                 display
@@ -51,8 +58,10 @@ struct ComputerEditorView: View {
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(model.isNew ? "Add" : "Save") { onFinish(model.save()) }
-                        .disabled(!model.canSave)
+                    Button(model.isNew ? "Add" : "Save") {
+                        Task { if let saved = await model.save() { onFinish(saved) } }
+                    }
+                    .disabled(!model.canSave)
                 }
             }
             .confirmationDialog("Discard your changes?", isPresented: $confirmsDiscard, titleVisibility: .visible) {
@@ -62,9 +71,25 @@ struct ComputerEditorView: View {
             .confirmationDialog("Delete this computer?", isPresented: $confirmsDelete, titleVisibility: .visible) {
                 Button("Delete Computer", role: .destructive) { onDelete() }
             }
+            .alert("Password Security", item: $model.problem) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { problem in
+                Text(problem)
+            }
+            .sheet(isPresented: $showsSSHKeys, onDismiss: reloadKeys) {
+                SSHKeysView(store: sshKeys, hostKeys: hostKeys, owner: model.owner)
+            }
+            .onChange(of: focus) { _, field in
+                // A password only the owner can read is shown once they agree to it; both are
+                // unlocked by one agreement.
+                if field == .password && model.isPasswordLocked || field == .tunnelPassword && model.isTunnelPasswordLocked {
+                    Task { await model.unlockPasswords() }
+                }
+            }
         }
         .interactiveDismissDisabled(model.hasChanges)
         .onAppear {
+            ownerCheck = model.owner.check()
             reloadKeys()
             showsTunnel = model.isTunnelEnabled
             if model.isNew && model.address.isEmpty { focus = .address }
@@ -107,12 +132,24 @@ struct ComputerEditorView: View {
                     .accessibilityIdentifier("username")
             }
             FieldRow("Password") {
-                SecureField("Password", text: $model.password, prompt: Text("Ask Every Time"))
+                SecureField("Password", text: $model.password, prompt: Text(model.isPasswordLocked ? "Saved" : "Ask Every Time"))
                     .textContentType(.password)
+                    .focused($focus, equals: .password)
                     .accessibilityIdentifier("password")
             }
         } header: {
             Text("Sign In")
+        }
+    }
+
+    private var passwordSecurity: some View {
+        Section {
+            DisclosureGroup("Password Security", isExpanded: $showsPasswordSecurity) {
+                SecretProtectionToggles(
+                    protection: $model.configuration.passwordProtection, ownerCheck: ownerCheck,
+                    applies: model.hasPassword, offersICloudKeychain: false
+                )
+            }
         }
     }
 
@@ -166,7 +203,8 @@ struct ComputerEditorView: View {
                             .autocorrectionDisabled()
                     }
                     FieldRow("Password") {
-                        SecureField("SSH Password", text: $model.tunnelPassword, prompt: Text("Ask Every Time"))
+                        SecureField("SSH Password", text: $model.tunnelPassword, prompt: Text(model.isTunnelPasswordLocked ? "Saved" : "Ask Every Time"))
+                            .focused($focus, equals: .tunnelPassword)
                     }
                     Picker("SSH Key", selection: $model.configuration.tunnel.keyName) {
                         Text("None").tag(String?.none)
@@ -174,10 +212,7 @@ struct ComputerEditorView: View {
                             Text(name).tag(Optional(name))
                         }
                     }
-                    NavigationLink("Manage SSH Keys") {
-                        SSHKeysView(store: sshKeys)
-                            .onDisappear(perform: reloadKeys)
-                    }
+                    Button("Manage SSH Keys") { showsSSHKeys = true }
                 }
             }
         } footer: {
@@ -224,10 +259,13 @@ struct ComputerEditorView: View {
     }
 
     private func reloadKeys() {
-        var names = ((try? sshKeys.all()) ?? []).map(\.name)
-        // A key that was deleted stays selectable so the setting is not silently changed.
-        if let chosen = model.configuration.tunnel.keyName, !names.contains(chosen) { names.append(chosen) }
-        keyNames = names
+        guard let keys = try? sshKeys.all() else {
+            // Unreadable for now: the choice stays as it is.
+            keyNames = model.configuration.tunnel.keyName.map { [$0] } ?? []
+            return
+        }
+        keyNames = keys.map(\.name)
+        if let chosen = model.configuration.tunnel.keyName, !keyNames.contains(chosen) { model.configuration.tunnel.keyName = nil }
     }
 
     /// Shows Standard while the tunnel forces it, without overwriting the user's own choice.
@@ -246,29 +284,5 @@ struct ComputerEditorView: View {
     /// Off while there can be no sound, and back to the user's choice when there can.
     private var audioBinding: Binding<Bool> {
         Binding(get: { model.configuration.audioEnabled && model.configuration.allowsAudio }, set: { model.configuration.audioEnabled = $0 })
-    }
-}
-
-/// A form row of a title and a field: side by side, field trailing; at accessibility text sizes the
-/// field goes under its title, with the row's full width.
-private struct FieldRow<Field: View>: View {
-    let title: LocalizedStringKey
-    @ViewBuilder var field: Field
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    init(_ title: LocalizedStringKey, @ViewBuilder field: () -> Field) {
-        self.title = title
-        self.field = field()
-    }
-
-    var body: some View {
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                field.multilineTextAlignment(.leading)
-            }
-        } else {
-            LabeledContent(title) { field.multilineTextAlignment(.trailing) }
-        }
     }
 }

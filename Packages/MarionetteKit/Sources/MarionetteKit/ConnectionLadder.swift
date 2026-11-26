@@ -110,7 +110,8 @@ public struct LiveTransportFactory: TransportFactory {
         let target = computer.tunnelTarget
         let handle: any SSHSessionHandle
         do {
-            handle = try await services.open(target, prompts: prompts)
+            let access = (prompts as? any SecretAccessHolder)?.secretAccess ?? .denied
+            handle = try await services.open(target, prompts: prompts, access: access)
         } catch {
             throw error.tunnelFailure(server: target.server)
         }
@@ -343,6 +344,12 @@ struct FallbackRungPrompts: PromptHandler {
         }
         return await base.resolve(prompt)
     }
+}
+
+/// A prompt handler that also holds the device owner's agreement for the session's protected
+/// secrets, so that unlocking the tunnel's key and the saved password asks the owner once.
+protocol SecretAccessHolder: PromptHandler {
+    var secretAccess: SecretAccess { get }
 }
 
 /// A prompt handler that treats questions from a fallback rung (``FallbackRungPrompts``) apart.

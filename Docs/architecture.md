@@ -37,6 +37,10 @@ Each layer depends only on the ones below it.
 - **High Performance needs a direct path.** Its media is SRTP over UDP on ports 5900–5902, the same
   numbers at both ends. A device can therefore hold one High Performance session at a time, and a
   session through an SSH tunnel is Standard, without sound.
+- **Reading a secret never shows a prompt by itself.** Passwords and keys that require Face ID are read
+  with the context of one `SecretAccess` per session, which asks the owner once, explicitly; the
+  saved password, the tunnel's key and its passphrase then open without asking again. A Secure
+  Enclave key signs through libssh2's signing callback, so its private half is never in memory.
 - **Front ends read capabilities, not back-end identity.** A control exists because the session
   offers the capability, and shows the reason when it does not.
 - **The simulated back end ships in the app.** It powers the demo computer, the UI tests and the

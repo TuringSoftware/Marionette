@@ -37,15 +37,20 @@ public final class LibraryModel {
     private let secrets: any SecretStore
     private let discovery: any DiscoveryProvider
     private let clock: any AppClock
+    private let owner: OwnerAuthentication
     private var discoveryTask: Task<Void, Never>?
     /// Identifiers of computers with an open session; supplied by the session store.
     public var activeComputerIDs: Set<UUID> = []
 
-    public init(repository: ComputerRepository, secrets: any SecretStore, discovery: any DiscoveryProvider, clock: any AppClock) {
+    public init(
+        repository: ComputerRepository, secrets: any SecretStore, discovery: any DiscoveryProvider, clock: any AppClock,
+        owner: OwnerAuthentication = .simulated
+    ) {
         self.repository = repository
         self.secrets = secrets
         self.discovery = discovery
         self.clock = clock
+        self.owner = owner
         reload()
     }
 
@@ -122,7 +127,7 @@ public final class LibraryModel {
     }
 
     private func makeEditor(_ configuration: ComputerConfiguration, isNew: Bool) -> ComputerEditorModel {
-        ComputerEditorModel(configuration: configuration, isNew: isNew, repository: repository, secrets: secrets, clock: clock) { [weak self] in
+        ComputerEditorModel(configuration: configuration, isNew: isNew, repository: repository, secrets: secrets, clock: clock, owner: owner) { [weak self] in
             self?.reload()
         }
     }

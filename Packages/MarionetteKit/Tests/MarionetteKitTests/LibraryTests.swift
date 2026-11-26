@@ -99,7 +99,7 @@ import Testing
         #expect(repository.record(id: SeedData.macMiniID)?.configuration.display == .remoteDisplays)
     }
 
-    @Test func editorValidatesAndSaves() throws {
+    @Test func editorValidatesAndSaves() async throws {
         let (library, secrets) = try makeLibrary()
         #expect(library.isEmpty)
         let editor = library.editorForNewComputer()
@@ -116,7 +116,7 @@ import Testing
         editor.portText = "70000"
         #expect(!editor.canSave)
         editor.portText = "5901"
-        let saved = try #require(editor.save())
+        let saved = try #require(await editor.save())
         #expect(saved.port == 5901)
         #expect(library.items.map(\.configuration.displayName) == ["studio-mac.local"])
         #expect(try secrets.secret(for: .remoteDesktopPassword(for: saved)) == "secret")
@@ -127,7 +127,7 @@ import Testing
         again.configuration.name = "Studio"
         again.password = ""
         #expect(again.hasChanges)
-        again.save()
+        await again.save()
         #expect(library.items.first?.configuration.displayName == "Studio")
         #expect(try secrets.secret(for: .remoteDesktopPassword(for: saved)) == nil)
 
@@ -135,11 +135,11 @@ import Testing
         // carried over unless it is typed again.
         let moving = try #require(library.editor(for: saved.id))
         moving.password = "secret"
-        moving.save()
+        await moving.save()
         let renamed = try #require(library.editor(for: saved.id))
         #expect(renamed.password == "secret")
         renamed.address = "studio-mac.example.com"
-        let moved = try #require(renamed.save())
+        let moved = try #require(await renamed.save())
         #expect(try secrets.secret(for: .remoteDesktopPassword(for: moved)) == nil)
         #expect(try secrets.secret(for: .remoteDesktopPassword(for: saved)) == nil, "nor left behind for the old one")
         #expect(try #require(library.editor(for: saved.id)).password.isEmpty)

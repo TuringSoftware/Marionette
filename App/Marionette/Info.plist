@@ -31,6 +31,8 @@
 		<string>_rfb._tcp</string>
 		<string>_ssh._tcp</string>
 	</array>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Marionette uses Face ID to unlock the passwords and SSH keys you protect with it.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Turing Software, LLC</string>
 	<key>NSLocalNetworkUsageDescription</key>

@@ -194,7 +194,7 @@ struct TunnelFixture {
     }
 
     @Test func theComputersKeyIsTriedBeforeAPasswordAndItsPassphraseIsAskedFor() async throws {
-        let file = SSHPrivateKeyFile.generateEd25519()
+        let file = try SSHPrivateKeyFile.generate(.ed25519)
         let key = Data(file.text.utf8)
         var server = ScriptedSSHConnector.Server()
         server.authorizedKeys = [key: "open sesame"]
@@ -249,11 +249,11 @@ struct TunnelFixture {
         let fixture = TunnelFixture(TunnelFixture.accepting(password: "right"))
         let target = fixture.computer.tunnelTarget
         let silent = ScriptedPrompts([.trustHostKey(remember: false)])
-        _ = try await fixture.services.open(target, prompts: silent, presetPassword: "right")
+        _ = try await fixture.services.open(target, prompts: silent, access: .denied, presetPassword: "right")
         #expect(silent.credentialRequests.isEmpty)
 
         let asked = ScriptedPrompts([.trustHostKey(remember: false), .credentials(username: "", password: "nope"), .credentials(username: "", password: "right")])
-        _ = try await fixture.services.open(target, prompts: asked, presetPassword: "stale")
+        _ = try await fixture.services.open(target, prompts: asked, access: .denied, presetPassword: "stale")
         #expect(asked.credentialRequests.map(\.attempt) == [1, 2])
         #expect(asked.credentialRequests.map(\.previousFailure) == [nil, "The password is incorrect."])
     }
@@ -389,7 +389,7 @@ private final class CancellingPrompts: PromptHandler {
     }
 
     @Test func theBrokerAnswersTheTunnelPasswordFromTheSavedSecretAndRemembersPassphrases() async throws {
-        let file = SSHPrivateKeyFile.generateEd25519()
+        let file = try SSHPrivateKeyFile.generate(.ed25519)
         var server = ScriptedSSHConnector.Server()
         server.authorizedKeys = [Data(file.text.utf8): "open sesame"]
         let fixture = TunnelFixture(server)
@@ -400,7 +400,7 @@ private final class CancellingPrompts: PromptHandler {
         computer.tunnel.keyName = "Work"
 
         let broker = PromptBroker(computer: computer, secrets: secrets)
-        let first = Task { try await services.open(computer.tunnelTarget, prompts: broker) }
+        let first = Task { try await services.open(computer.tunnelTarget, prompts: broker, access: broker.secretAccess) }
         try await waitUntil { broker.pending != nil }
         broker.reply(.trustHostKey(remember: true))
         try await waitUntil { broker.pending != nil }
@@ -417,7 +417,7 @@ private final class CancellingPrompts: PromptHandler {
         var other = computer
         other.id = UUID()
         let later = PromptBroker(computer: other, secrets: secrets)
-        _ = try await services.open(computer.tunnelTarget, prompts: later)
+        _ = try await services.open(computer.tunnelTarget, prompts: later, access: later.secretAccess)
         #expect(later.pending == nil)
 
         try keys.delete(named: "Work")
@@ -578,7 +578,7 @@ private final class CancellingPrompts: PromptHandler {
         let tool = try Tool()
         defer { tool.cleanUp() }
         let store = SSHKeyStore(secrets: InMemorySecretStore())
-        let info = try store.generateEd25519(named: "  iPad  ", now: Date(timeIntervalSince1970: 10))
+        let info = try store.generate(named: "  iPad  ", now: Date(timeIntervalSince1970: 10))
         #expect(info.name == "iPad")
         #expect(info.type == "ssh-ed25519" && info.typeName == "Ed25519")
         #expect(!info.isEncrypted)
@@ -593,7 +593,7 @@ private final class CancellingPrompts: PromptHandler {
         #expect(try store.all() == [info])
         #expect(store.key(named: "iPad") == info)
 
-        let second = try store.generateEd25519(named: "Second")
+        let second = try store.generate(named: "Second")
         #expect(second.publicKey != info.publicKey)
     }
 
@@ -604,7 +604,7 @@ private final class CancellingPrompts: PromptHandler {
         for (name, arguments, passphrase, type, typeName) in [
             ("ed", ["-t", "ed25519"], "", "ssh-ed25519", "Ed25519"),
             ("ec", ["-t", "ecdsa", "-b", "256"], "", "ecdsa-sha2-nistp256", "ECDSA P-256"),
-            ("rsa", ["-t", "rsa", "-b", "2048"], "", "ssh-rsa", "RSA"),
+            ("rsa", ["-t", "rsa", "-b", "2048"], "", "ssh-rsa", "RSA 2048"),
             ("locked", ["-t", "ed25519"], "open sesame", "ssh-ed25519", "Ed25519"),
         ] {
             let made = try tool.make(name, arguments, passphrase: passphrase)
@@ -667,10 +667,11 @@ private final class CancellingPrompts: PromptHandler {
         #expect(error("a", "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----") == .notAPrivateKey)
         #expect(error("a", String(made.text.dropLast(40))) == .notAPrivateKey)
         #expect(error("a", "-----BEGIN DSA PRIVATE KEY-----\nAAAA\n-----END DSA PRIVATE KEY-----") == .unsupportedKeyType("DSA"))
-        #expect(error("  ", made.text) == .invalidName)
         #expect(error("a", made.text) == nil)
         #expect(error("a", made.text) == .nameInUse("a"))
-        #expect(try store.all().map(\.name) == ["a"])
+        // Without a name, an unused one.
+        #expect(error("  ", made.text) == nil)
+        #expect(try store.all().map(\.name) == ["a", "Imported Key"])
         #expect(SSHKeyError.nameInUse("a").message == "There is already a key named “a”.")
     }
 
@@ -679,9 +680,9 @@ private final class CancellingPrompts: PromptHandler {
         let store = SSHKeyStore(secrets: secrets)
         #expect(try store.all().isEmpty)
         #expect(store.availableName(basedOn: " Work ") == "Work")
-        try store.generateEd25519(named: "Work")
-        try store.generateEd25519(named: "Work 2")
-        try store.generateEd25519(named: "home")
+        try store.generate(named: "Work")
+        try store.generate(named: "Work 2")
+        try store.generate(named: "home")
         #expect(store.availableName(basedOn: "Work") == "Work 3")
         #expect(store.availableName(basedOn: "") == "SSH Key")
         #expect(try store.all().map(\.name) == ["home", "Work", "Work 2"])
@@ -705,14 +706,16 @@ private final class CancellingPrompts: PromptHandler {
 
     @Test func aFailingKeychainIsReportedAsSuch() {
         struct Broken: SecretStore {
-            func secret(for key: SecretKey) throws -> String? { throw SecretStoreError.storeFailure(code: -25308) }
-            func setSecret(_ secret: String, for key: SecretKey) throws { throw SecretStoreError.storeFailure(code: -25308) }
+            func secret(for key: SecretKey, access: SecretAccess?) throws -> String? { throw SecretStoreError.storeFailure(code: -25308) }
+            func setSecret(_ secret: String, for key: SecretKey, protection: SecretProtection) throws { throw SecretStoreError.storeFailure(code: -25308) }
             func removeSecret(for key: SecretKey) throws {}
+            func names(of kind: SecretKey.Kind) throws -> [String] { throw SecretStoreError.storeFailure(code: -25308) }
         }
         let store = SSHKeyStore(secrets: Broken())
         #expect(throws: SSHKeyError.storage(code: -25308)) { try store.all() }
-        #expect(throws: SSHKeyError.storage(code: -25308)) { try store.generateEd25519(named: "a") }
+        #expect(throws: SSHKeyError.storage(code: -25308)) { try store.generate(named: "a") }
         #expect(store.key(named: "a") == nil)
+        #expect(throws: SSHKeyError.storage(code: -25308)) { try store.privateKey(named: "a") }
     }
 
     @Test func aTunnelsKeyNameIsOptionalInStoredComputers() throws {

@@ -214,6 +214,18 @@ public final class LocalSSHServer: @unchecked Sendable {
         try await SSHSession.connect(over: try SocketTransport(port: port))
     }
 
+    private let authorizing = NSLock()
+
+    /// Lets one more key log in, given as a line of `authorized_keys` ("type base64 comment").
+    public func authorize(_ line: String) throws {
+        try authorizing.withLock {
+            let handle = try FileHandle(forWritingTo: directory.appending(path: "authorized_keys"))
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data((line + "\n").utf8))
+        }
+    }
+
     /// A connected session, logged in with the ed25519 key.
     public func login() async throws -> SSHSession {
         let session = try await connect()

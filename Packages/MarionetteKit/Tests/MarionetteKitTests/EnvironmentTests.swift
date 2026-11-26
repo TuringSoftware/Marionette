@@ -19,7 +19,7 @@ import Testing
         #expect(await environment.hostKeys.all().isEmpty)
         #expect(try environment.sshKeys.all().isEmpty)
         // Keys live in the environment's own secret store, where the prompt broker finds passphrases.
-        try environment.sshKeys.generateEd25519(named: "Work")
+        try environment.sshKeys.generate(named: "Work")
         #expect(try environment.secrets.secret(for: SecretKey(appWide: .sshPrivateKey, name: "Work")) != nil)
         #expect(environment.transports.ssh == nil)
     }

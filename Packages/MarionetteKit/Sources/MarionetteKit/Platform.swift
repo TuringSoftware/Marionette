@@ -53,10 +53,12 @@ public struct SecretKey: Sendable, Hashable {
         case tunnelPassword = "ssh"
         /// The passphrase of an SSH key. Filed per key (``SecretKey/init(appWide:name:)``), not per computer.
         case keyPassphrase = "key"
-        /// An SSH private key. App-wide, named by the user.
+        /// An SSH private key, or the Secure Enclave's handle to one. App-wide, named by the user.
         case sshPrivateKey = "pk"
-        /// The list of SSH keys (names and public halves). App-wide.
-        case sshKeyIndex = "pki"
+        /// What is known of an SSH key without its private half: kind, public key, storage. One per
+        /// key, kept where the key is kept (iCloud Keychain, backups) but never behind the owner
+        /// check, so that keys can be listed without asking.
+        case sshKeyInfo = "pki"
         /// Not a secret: the mark that the computer at an address proved its identity with Apple's
         /// SRP login. Filed by address like the password it protects, and removed with it.
         case provenIdentity = "srp"
@@ -151,16 +153,55 @@ extension ComputerConfiguration {
 public enum SecretStoreError: Error, Sendable, Hashable {
     /// The underlying store reported a failure (for the Keychain, an `OSStatus`).
     case storeFailure(code: Int32)
+    /// The secret requires the device owner, who has not agreed through the access given.
+    case authenticationRequired
 }
 
-/// Passwords and passphrases. Never stored with the saved computers.
+/// Passwords, passphrases and keys. Never stored with the saved computers.
 public protocol SecretStore: Sendable {
-    func secret(for key: SecretKey) throws -> String?
-    func setSecret(_ secret: String, for key: SecretKey) throws
+    /// Reads a secret without ever asking anyone: one that requires the device owner throws
+    /// ``SecretStoreError/authenticationRequired`` unless `access` holds their agreement.
+    func secret(for key: SecretKey, access: SecretAccess?) throws -> String?
+    /// Stores a secret, replacing any of the same key, kept as `protection` says.
+    func setSecret(_ secret: String, for key: SecretKey, protection: SecretProtection) throws
     func removeSecret(for key: SecretKey) throws
+    /// The names of the app-wide secrets of one kind (``SecretKey/init(appWide:name:)``).
+    func names(of kind: SecretKey.Kind) throws -> [String]
 }
 
 extension SecretStore {
+    /// Reads a secret that needs no owner.
+    public func secret(for key: SecretKey) throws -> String? {
+        try secret(for: key, access: nil)
+    }
+
+    /// Stores a secret on this device only, out of backups and iCloud Keychain.
+    public func setSecret(_ secret: String, for key: SecretKey) throws {
+        try setSecret(secret, for: key, protection: .thisDeviceOnly)
+    }
+
+    /// Reads a secret, asking the device owner through `access` if it requires them and they have
+    /// not agreed yet. `nil` when there is none, or the owner did not agree.
+    public func unlockedSecret(for key: SecretKey, access: SecretAccess, reason: String) async throws -> String? {
+        do {
+            return try secret(for: key, access: access)
+        } catch SecretStoreError.authenticationRequired {
+            guard await access.authenticate(reason: reason) else { return nil }
+            return try secret(for: key, access: access)
+        }
+    }
+
+    /// Whether a secret is stored, without reading it or asking anyone.
+    public func hasSecret(for key: SecretKey) -> Bool {
+        do {
+            return try secret(for: key, access: nil) != nil
+        } catch SecretStoreError.authenticationRequired {
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Removes everything stored for one computer, at its current address and from before
     /// passwords were filed by address.
     public func removeAllSecrets(for computer: ComputerConfiguration) {
@@ -205,20 +246,31 @@ extension SecretStore {
 }
 
 public final class InMemorySecretStore: SecretStore {
-    private let storage = Mutex<[SecretKey: String]>([:])
+    private let storage = Mutex<[SecretKey: (secret: String, protection: SecretProtection)]>([:])
 
     public init() {}
 
-    public func secret(for key: SecretKey) throws -> String? {
-        storage.withLock { $0[key] }
+    public func secret(for key: SecretKey, access: SecretAccess?) throws -> String? {
+        guard let stored = storage.withLock({ $0[key] }) else { return nil }
+        if stored.protection.requiresUserPresence, access?.isGranted != true { throw SecretStoreError.authenticationRequired }
+        return stored.secret
     }
 
-    public func setSecret(_ secret: String, for key: SecretKey) throws {
-        storage.withLock { $0[key] = secret }
+    public func setSecret(_ secret: String, for key: SecretKey, protection: SecretProtection) throws {
+        storage.withLock { $0[key] = (secret, protection) }
     }
 
     public func removeSecret(for key: SecretKey) throws {
         storage.withLock { $0[key] = nil }
+    }
+
+    public func names(of kind: SecretKey.Kind) throws -> [String] {
+        storage.withLock { $0.keys.filter { $0.kind == kind }.compactMap(\.name) }
+    }
+
+    /// How a stored secret is kept; `nil` when there is none.
+    public func protection(for key: SecretKey) -> SecretProtection? {
+        storage.withLock { $0[key]?.protection }
     }
 }
 

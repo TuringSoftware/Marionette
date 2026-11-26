@@ -78,6 +78,7 @@ public final class FileAccessModel {
 
     @ObservationIgnored private let ssh: SSHServices?
     @ObservationIgnored private let prompts: any PromptHandler
+    @ObservationIgnored private let access: SecretAccess
     @ObservationIgnored private let accountCredentials: () -> (username: String, password: String)?
     @ObservationIgnored private let onSignedIn: () -> Void
 
@@ -99,15 +100,18 @@ public final class FileAccessModel {
     ///   - prompts: Asked about host keys, passwords and passphrases while signing in.
     ///   - accountCredentials: The account and password already used for remote desktop this
     ///     session, if known. Tried first, so that signing in to the same account asks nothing.
+    ///   - access: Unlocks an SSH key that requires the device owner.
     ///   - onSignedIn: Called when signing in succeeded: what was typed on the way was right.
     public init(
         ssh: SSHServices?,
         prompts: any PromptHandler,
+        access: SecretAccess = .denied,
         accountCredentials: @escaping () -> (username: String, password: String)? = { nil },
         onSignedIn: @escaping () -> Void = {}
     ) {
         self.ssh = ssh
         self.prompts = prompts
+        self.access = access
         self.accountCredentials = accountCredentials
         self.onSignedIn = onSignedIn
     }
@@ -118,6 +122,7 @@ public final class FileAccessModel {
         self.init(
             ssh: ssh,
             prompts: broker,
+            access: broker.secretAccess,
             accountCredentials: { [weak broker] in broker?.knownCredentials(for: .remoteDesktop(host: "")) },
             onSignedIn: { [weak broker] in broker?.connectionSucceeded() }
         )
@@ -200,10 +205,11 @@ public final class FileAccessModel {
         generation += 1
         let token = generation
         let prompts = prompts
+        let access = access
         signInTask = Task { [weak self] in
             let result: Result<any SSHSessionHandle, SSHConnectionError>
             do throws(SSHConnectionError) {
-                result = .success(try await ssh.open(target, prompts: prompts, presetPassword: preset, purpose: .fileAccess(host: target.server.host)))
+                result = .success(try await ssh.open(target, prompts: prompts, access: access, presetPassword: preset, purpose: .fileAccess(host: target.server.host)))
             } catch {
                 result = .failure(error)
             }

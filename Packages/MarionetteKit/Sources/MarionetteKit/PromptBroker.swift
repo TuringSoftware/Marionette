@@ -20,7 +20,7 @@ public import RemoteDesktopCore
 /// proves nothing about the server and usually encrypts nothing.
 @MainActor
 @Observable
-public final class PromptBroker: PromptHandler, FallbackPromptHandler {
+public final class PromptBroker: PromptHandler, FallbackPromptHandler, SecretAccessHolder {
     /// A question waiting for the user.
     public struct Pending: Identifiable, Sendable, Hashable {
         public let id: UUID
@@ -41,6 +41,10 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler {
     /// The computer being connected to. Its address decides which saved secrets apply.
     @ObservationIgnored var computer: ComputerConfiguration
     private let secrets: any SecretStore
+    /// The device owner's agreement for this session's protected secrets: the saved password, the
+    /// tunnel's key and its passphrase. The first of them that needs it asks; the rest do not.
+    public nonisolated let secretAccess: SecretAccess
+    private let keys: SSHKeyStore
     private var savedUsername: String
     private var continuation: CheckedContinuation<PromptResponse, Never>?
     /// What was last sent to the server, per secret; kept so a reconnect does not ask again.
@@ -56,6 +60,8 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler {
     private var fallbackCredentials: Credentials?
     /// Key passphrases that were sent, by key name; kept so a reconnect does not ask again.
     private var sessionPassphrases: [String: String] = [:]
+    /// Key passphrases read from where they were saved behind the owner check.
+    private var unlockedPassphrases: Set<String> = []
     /// Key passphrases the user asked to remember, stored once the connection succeeds.
     private var passphrasesToRemember: [String: String] = [:]
     /// The session-select choice answered on the attempt under way, and the last one that led to a
@@ -69,11 +75,18 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler {
     /// sign-in sheet offers to save it instead of only its password.
     public var isComputerSaved = true
 
-    public init(computer: ComputerConfiguration, secrets: any SecretStore) {
+    public init(computer: ComputerConfiguration, secrets: any SecretStore, access: SecretAccess = SecretAccess { _ in true }) {
         self.computer = computer
         self.savedUsername = computer.username
         self.secrets = secrets
+        secretAccess = access
+        keys = SSHKeyStore(secrets: secrets)
         secrets.migrateLegacySecrets(of: computer)
+    }
+
+    /// What the system shows when the owner is asked (with Touch ID and the passcode).
+    private var unlockReason: String {
+        String(localized: "Sign in to “\(computer.displayName)”.", bundle: #bundle)
     }
 
     // MARK: PromptHandler
@@ -100,7 +113,7 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler {
                 if let known = sessionCredentials[key] {
                     return .credentials(username: known.username, password: known.password)
                 }
-                if !staleSaved.contains(key), let saved = savedCredentials(key: key, request: request) {
+                if !staleSaved.contains(key), let saved = await savedCredentials(key: key, request: request) {
                     sessionCredentials[key] = saved
                     sentSaved.insert(key)
                     return .credentials(username: saved.username, password: saved.password)
@@ -114,8 +127,12 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler {
             }
         case .keyPassphrase(let request):
             if request.attempt == 1 {
-                if let known = sessionPassphrases[request.keyName] ?? savedPassphrase(for: request.keyName) {
+                if let known = sessionPassphrases[request.keyName] {
+                    return .passphrase(known)
+                }
+                if let known = await savedPassphrase(for: request.keyName) {
                     sessionPassphrases[request.keyName] = known
+                    if keys.passphraseProtection(for: request.keyName).requiresUserPresence { unlockedPassphrases.insert(request.keyName) }
                     return .passphrase(known)
                 }
             } else {
@@ -136,24 +153,31 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler {
         return await present(prompt, fromFallbackRung: onFallbackRung)
     }
 
-    private func savedPassphrase(for keyName: String) -> String? {
-        guard let passphrase = try? secrets.secret(for: SecretKey(appWide: .keyPassphrase, name: keyName)), !passphrase.isEmpty else {
+    private func savedPassphrase(for keyName: String) async -> String? {
+        let key = SecretKey(appWide: .keyPassphrase, name: keyName)
+        guard let passphrase = (try? await secrets.unlockedSecret(for: key, access: secretAccess, reason: unlockReason)) ?? nil, !passphrase.isEmpty else {
             return nil
         }
         return passphrase
     }
 
-    private func savedCredentials(key: SecretKey, request: CredentialRequest) -> Credentials? {
-        guard let password = savedSecret(key) else { return nil }
+    /// The saved password for `key`, asking the device owner if it requires them. A password they
+    /// did not unlock is as good as none: the user is asked for it.
+    private func savedCredentials(key: SecretKey, request: CredentialRequest) async -> Credentials? {
+        guard let password = (try? await secrets.unlockedSecret(for: key, access: secretAccess, reason: unlockReason)) ?? nil, !password.isEmpty else {
+            return nil
+        }
         let username = key.kind == .remoteDesktopPassword ? savedUsername : (request.suggestedUsername ?? savedUsername)
         if request.kind == .usernameAndPassword, username.isEmpty { return nil }
         return Credentials(username: username, password: password)
     }
 
+    /// The saved secret, if it can be read without asking anyone (as one already unlocked can).
     private func savedSecret(_ key: SecretKey) -> String? {
-        guard let secret = (try? secrets.secret(for: key)) ?? nil, !secret.isEmpty else { return nil }
+        guard let secret = (try? secrets.secret(for: key, access: secretAccess)) ?? nil, !secret.isEmpty else { return nil }
         return secret
     }
+
 
     private func present(_ prompt: SessionPrompt, fromFallbackRung: Bool) async -> PromptResponse {
         // A back end asks one question at a time; a second one replaces a stale first.
@@ -236,7 +260,7 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler {
             staleSaved.remove(key)
         }
         for (key, credentials) in toRemember {
-            try? secrets.setSecret(credentials.password, for: key)
+            try? secrets.setSecret(credentials.password, for: key, protection: computer.passwordProtection)
             staleSaved.remove(key)
             if key.kind == .remoteDesktopPassword {
                 if !credentials.username.isEmpty { savedUsername = credentials.username }
@@ -246,13 +270,26 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler {
         toRemember.removeAll()
         // A passphrase belongs to its key, not to this computer: every computer using the key gets it.
         for (keyName, passphrase) in passphrasesToRemember {
-            try? secrets.setSecret(passphrase, for: SecretKey(appWide: .keyPassphrase, name: keyName))
+            try? secrets.setSecret(passphrase, for: SecretKey(appWide: .keyPassphrase, name: keyName), protection: keys.passphraseProtection(for: keyName))
         }
         passphrasesToRemember.removeAll()
         if let pendingChoice {
             acceptedChoice = pendingChoice
             self.pendingChoice = nil
         }
+    }
+
+    /// Forgets the owner's agreement and what it unlocked: saved passwords that require the owner
+    /// and passphrases read from behind the owner check. The next use asks the owner again. What the
+    /// user typed is kept. Called when the app leaves the screen.
+    public func lockProtectedSecrets() {
+        secretAccess.invalidate()
+        if computer.passwordProtection.requiresUserPresence {
+            for key in sentSaved { sessionCredentials[key] = nil }
+            sentSaved.removeAll()
+        }
+        for name in unlockedPassphrases { sessionPassphrases[name] = nil }
+        unlockedPassphrases.removeAll()
     }
 
     /// Makes the next attempt ask for the remote-desktop password, and for an SSH password the

@@ -5,6 +5,7 @@ import Foundation
 import RemoteDesktopCore
 import RemoteDesktopTransport
 import SwiftSSH2TestSupport
+import Synchronization
 import Testing
 @testable import MarionetteKit
 
@@ -34,16 +35,36 @@ import Testing
         func cleanUp() { try? FileManager.default.removeItem(at: folder) }
     }
 
+    /// A key that signs where it is kept signs in to a real OpenSSH server.
+    @Test func aHardwareKeySignsInToOpenSSH() async throws {
+        let server = try server
+        let keys = SSHKeyStore(secrets: InMemorySecretStore(), hardware: SimulatedHardwareKeys())
+        let info = try keys.generate(named: "Enclave", storage: SSHKeyStorage(isInSecureEnclave: true, protection: SecretProtection(requiresUserPresence: true)))
+        try server.authorize(try #require(info.authorizedKeysLine))
+        let services = SSHServices(connector: LiveSSHConnector(connectTimeout: .seconds(5)), hostKeys: InMemoryKnownHostsStore(), keys: keys)
+        let target = SSHTarget(server: Endpoint(host: "127.0.0.1", port: server.port), username: server.username, keyName: "Enclave")
+
+        let asked = Mutex(0)
+        let access = SecretAccess { _ in
+            asked.withLock { $0 += 1 }
+            return true
+        }
+        let handle = try await services.open(target, prompts: ScriptedPrompts([.trustHostKey(remember: false)]), access: access)
+        #expect(asked.withLock { $0 } == 1)
+        await handle.close()
+
+        // Without the owner the key is not offered, and the server accepts nothing else.
+        await #expect(throws: SSHConnectionError.authenticationFailed) {
+            _ = try await services.open(target, prompts: ScriptedPrompts([.trustHostKey(remember: false)]), access: .denied)
+        }
+    }
+
     @Test func aGeneratedKeyOpensATunnelThatCarriesStreamsAndFiles() async throws {
         let echo = try EchoServer()
         var rig = Rig(server: try server, remoteDesktopPort: echo.port)
         defer { rig.cleanUp() }
-        let info = try rig.keys.generateEd25519(named: "iPad")
-        let authorized = try server.directory.appending(path: "authorized_keys")
-        let handle = try FileHandle(forWritingTo: authorized)
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data((try #require(info.authorizedKeysLine) + "\n").utf8))
-        try handle.close()
+        let info = try rig.keys.generate(named: "iPad")
+        try server.authorize(try #require(info.authorizedKeysLine))
         rig.computer.tunnel.keyName = "iPad"
 
         let prompts = ScriptedPrompts([.trustHostKey(remember: true)])

@@ -15,6 +15,7 @@ struct LibraryView: View {
     @State private var helpTopic: HelpTopic?
     @State private var pendingDeletion: LibraryModel.Item?
     @State private var showsSettings = false
+    @State private var showsSSHKeys = false
     private let addComputerTip = AddComputerTip()
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
@@ -36,12 +37,12 @@ struct LibraryView: View {
                         tip: addComputerTip,
                         itemTitle: String(localized: "Add Computer"),
                         // Only while the library itself is in front: not over a session or a sheet.
-                        isActive: sessions.presented == nil && editor == nil && helpTopic == nil && !showsSettings
+                        isActive: sessions.presented == nil && editor == nil && helpTopic == nil && !showsSettings && !showsSSHKeys
                     )
                 }
         }
         .sheet(item: $editor) { model in
-            ComputerEditorView(model: model, sshKeys: environment.sshKeys) { _ in
+            ComputerEditorView(model: model, sshKeys: environment.sshKeys, hostKeys: environment.hostKeys) { _ in
                 editor = nil
             } onDelete: {
                 editor = nil
@@ -53,6 +54,9 @@ struct LibraryView: View {
         }
         .sheet(isPresented: $showsSettings) {
             SettingsView(environment: environment)
+        }
+        .sheet(isPresented: $showsSSHKeys) {
+            SSHKeysView(store: environment.sshKeys, hostKeys: environment.hostKeys, owner: environment.owner)
         }
         .fullScreenCover(item: $sessions.presented) { session in
             SessionScreen(session: session)
@@ -84,6 +88,7 @@ struct LibraryView: View {
                 },
                 lookAgain: { Task { await library.refreshDiscovery() } },
                 showSettings: { BarButtonTipPresenter.dismissShown { showsSettings = true } },
+                showSSHKeys: { BarButtonTipPresenter.dismissShown { showsSSHKeys = true } },
                 showHelp: { BarButtonTipPresenter.dismissShown { helpTopic = .enableScreenSharing } }
             ) : nil
         }
@@ -215,6 +220,9 @@ struct LibraryView: View {
         }
         ToolbarItem(placement: .secondaryAction) {
             Button("Settings", systemImage: "gear") { BarButtonTipPresenter.dismissShown { showsSettings = true } }
+        }
+        ToolbarItem(placement: .secondaryAction) {
+            Button("SSH Keys", systemImage: "key") { BarButtonTipPresenter.dismissShown { showsSSHKeys = true } }
         }
     }
 

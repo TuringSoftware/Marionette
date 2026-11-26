@@ -79,6 +79,8 @@ public final class AppEnvironment {
     public let hostKeys: any KnownHostsStore
     /// The user's SSH keys, for an "SSH Keys" screen and the key picker of a computer's tunnel.
     public let sshKeys: SSHKeyStore
+    /// Confirms the device owner before protected passwords and keys are used.
+    public let owner: OwnerAuthentication
     public let discovery: any DiscoveryProvider
     public let pasteboard: any LocalPasteboard
     public let clock: any AppClock
@@ -96,6 +98,7 @@ public final class AppEnvironment {
         secrets: any SecretStore,
         hostKeys: (any KnownHostsStore)? = nil,
         sshKeys: SSHKeyStore? = nil,
+        owner: OwnerAuthentication = .simulated,
         discovery: any DiscoveryProvider,
         pasteboard: any LocalPasteboard,
         clock: any AppClock,
@@ -108,12 +111,13 @@ public final class AppEnvironment {
         self.secrets = secrets
         self.hostKeys = hostKeys ?? transports.ssh?.hostKeys ?? InMemoryKnownHostsStore()
         self.sshKeys = sshKeys ?? transports.ssh?.keys ?? SSHKeyStore(secrets: secrets)
+        self.owner = owner
         self.discovery = discovery
         self.pasteboard = pasteboard
         self.clock = clock
         self.defaults = defaults
         self.repository = repository
-        let library = LibraryModel(repository: repository, secrets: secrets, discovery: discovery, clock: clock)
+        let library = LibraryModel(repository: repository, secrets: secrets, discovery: discovery, clock: clock, owner: owner)
         self.library = library
         let ladder = ConnectionLadder(registry: registry, transports: transports)
         let isUITestMode = options.isUITestMode
@@ -121,6 +125,7 @@ public final class AppEnvironment {
             var dependencies = SessionModel.Dependencies(
                 ladder: ladder, secrets: secrets, pasteboard: pasteboard, clock: clock, repository: repository, defaults: defaults
             )
+            dependencies.owner = owner
             if isUITestMode {
                 dependencies.mutesAudio = true
                 dependencies.bannerDuration = nil
@@ -173,6 +178,7 @@ public final class AppEnvironment {
             registry: registry,
             transports: LiveTransportFactory(ssh: ssh),
             secrets: secrets,
+            owner: .live,
             discovery: BonjourDiscoveryProvider(),
             pasteboard: pasteboard,
             clock: SystemClock(),
@@ -214,6 +220,7 @@ public final class AppEnvironment {
             preferences.save(to: defaults)
         }
         let secrets = InMemorySecretStore()
+        let keys = SSHKeyStore(secrets: secrets, hardware: SimulatedHardwareKeys())
         let clock: any AppClock = options.isUITestMode ? FixedClock() : SystemClock()
         let repository = ComputerRepository(container: try! ComputerRepository.makeContainer(inMemory: true))
         await SeedData.seed(setup, into: repository, secrets: secrets, clock: clock)
@@ -222,10 +229,11 @@ public final class AppEnvironment {
             registry: registry,
             transports: SimulatedTransportFactory(
                 ssh: setup.providesSSH
-                    ? SSHServices(connector: ScriptedSSHConnector(), hostKeys: InMemoryKnownHostsStore(), keys: SSHKeyStore(secrets: secrets))
+                    ? SSHServices(connector: ScriptedSSHConnector(), hostKeys: InMemoryKnownHostsStore(), keys: keys)
                     : nil
             ),
             secrets: secrets,
+            sshKeys: keys,
             discovery: SimulatedDiscoveryProvider(computers: setup.discovered, delay: .milliseconds(options.isUITestMode ? 50 : 600), deniesPermission: setup.discoveryDenied),
             pasteboard: pasteboard ?? InMemoryPasteboard(),
             clock: clock,

@@ -45,7 +45,7 @@ enum SeedData {
             }
             if setup.savesPasswords || setup.savesWrongPassword {
                 let password = setup.savesWrongPassword ? "not-the-password" : "demo"
-                try? secrets.setSecret(password, for: .remoteDesktopPassword(for: configuration))
+                try? secrets.setSecret(password, for: .remoteDesktopPassword(for: configuration), protection: configuration.passwordProtection)
             }
         }
     }

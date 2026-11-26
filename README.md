@@ -19,7 +19,8 @@ mode, and works with any VNC server as a fallback.
   - Asking the signed-in user for permission, or opening a session of one's own.
 - **Any VNC server**, through LibVNCClient.
 - **SSH.** Tunnels a session over SSH, and browses, uploads and downloads the computer's files over SFTP,
-  with key management and known hosts.
+  with Ed25519, ECDSA, RSA and Secure Enclave keys, and known hosts. Passwords and keys can require
+  Face ID or Touch ID and be kept out of backups; keys can also go to iCloud Keychain.
 - **Files and clipboard.** Sends files to a Mac and drags them in and out with Apple's native file
   transfer; shares the clipboard on request or automatically.
 - **Input.** Touch or Mac-style trackpad, with magnify, rotate, smart zoom, swipe and momentum scrolling

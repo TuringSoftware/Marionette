@@ -3,6 +3,9 @@
 
 import CryptoKit
 public import Foundation
+public import RemoteDesktopTransport
+import Security
+import SwiftSSH2
 import Synchronization
 
 // MARK: - Key files
@@ -12,9 +15,9 @@ public enum SSHKeyError: Error, Sendable, Hashable {
     case notAPrivateKey
     /// A private key of a kind Marionette cannot log in with (`type` as the file names it).
     case unsupportedKeyType(String)
-    /// Key names must not be empty.
-    case invalidName
     case nameInUse(String)
+    /// This device has no Secure Enclave, or it refused to make a key.
+    case secureEnclaveUnavailable
     /// The Keychain refused (an `OSStatus`), or what it holds could not be read back (-1).
     case storage(code: Int32)
 
@@ -25,14 +28,95 @@ public enum SSHKeyError: Error, Sendable, Hashable {
             String(localized: "This isn’t an SSH private key. Paste the whole private key file, from “-----BEGIN” to the “-----END” line.", bundle: #bundle)
         case .unsupportedKeyType(let type):
             String(localized: "Marionette can’t use \(type) keys. Use an Ed25519, ECDSA or RSA key.", bundle: #bundle)
-        case .invalidName:
-            String(localized: "Give the key a name.", bundle: #bundle)
         case .nameInUse(let name):
             String(localized: "There is already a key named “\(name)”.", bundle: #bundle)
+        case .secureEnclaveUnavailable:
+            String(localized: "The Secure Enclave couldn’t make a key.", bundle: #bundle)
         case .storage(let code):
             String(localized: "The key couldn’t be saved in the Keychain (error \(code)).", bundle: #bundle)
         }
     }
+}
+
+/// The kinds of key Marionette makes.
+public enum SSHKeyType: String, Sendable, Hashable, Codable, CaseIterable {
+    case ed25519
+    case ecdsa
+    case rsa
+
+    public var title: String {
+        switch self {
+        case .ed25519: "Ed25519"
+        case .ecdsa: "ECDSA"
+        case .rsa: "RSA"
+        }
+    }
+
+    /// The sizes offered, in bits. Ed25519 has one.
+    public var sizes: [Int] {
+        switch self {
+        case .ed25519: [256]
+        case .ecdsa: [256, 384, 521]
+        case .rsa: [1024, 2048, 3072, 4096]
+        }
+    }
+
+    /// The size a new key of the type gets unless another is chosen.
+    public var defaultSize: Int {
+        switch self {
+        case .ed25519, .ecdsa: 256
+        case .rsa: 3072
+        }
+    }
+}
+
+/// A kind of key and its size. Older servers lack the newer kinds: Ed25519 needs OpenSSH 6.5,
+/// ECDSA 5.7; RSA works everywhere.
+public struct SSHKeyAlgorithm: Sendable, Hashable, Codable {
+    public var type: SSHKeyType
+    /// The size in bits: of the curve for Ed25519 and ECDSA, of the modulus for RSA.
+    public var bits: Int
+
+    public init(type: SSHKeyType, bits: Int? = nil) {
+        self.type = type
+        self.bits = bits.flatMap { type.sizes.contains($0) ? $0 : nil } ?? type.defaultSize
+    }
+
+    public static let ed25519 = SSHKeyAlgorithm(type: .ed25519)
+    /// The only kind a Secure Enclave makes.
+    public static let secureEnclave = SSHKeyAlgorithm(type: .ecdsa, bits: 256)
+
+    /// "Ed25519", "ECDSA P-256", "RSA 3072".
+    public var title: String {
+        switch type {
+        case .ed25519: type.title
+        case .ecdsa, .rsa: "\(type.title) \(sizeTitle(bits))"
+        }
+    }
+
+    /// A size as the strength picker shows it: "P-256" for a curve, "3072" for RSA.
+    public func sizeTitle(_ bits: Int) -> String {
+        type == .ecdsa ? "P-\(bits)" : "\(bits)"
+    }
+
+    /// RSA below 2048 bits can be broken with enough computing power.
+    public var isRecommended: Bool { type != .rsa || bits >= 2048 }
+
+    /// Why the choice is not recommended, for the person making the key.
+    public var caution: String? {
+        let size = String(bits)
+        return isRecommended ? nil : String(localized: "A \(size)-bit RSA key can be broken. Use one only for a server that accepts nothing stronger.", bundle: #bundle)
+    }
+
+    var sshName: String {
+        switch type {
+        case .ed25519: "ssh-ed25519"
+        case .ecdsa: "ecdsa-sha2-\(curveName)"
+        case .rsa: "ssh-rsa"
+        }
+    }
+
+    var curveName: String { "nistp\(bits)" }
 }
 
 /// A private key file and what it reveals without its passphrase.
@@ -154,24 +238,63 @@ public struct SSHPrivateKeyFile: Sendable, Hashable {
         return "-----BEGIN \(openSSHLabel)-----\n" + lines.joined(separator: "\n") + "\n-----END \(openSSHLabel)-----\n"
     }
 
-    /// A new Ed25519 key without a passphrase, in OpenSSH format.
-    public static func generateEd25519(comment: String = "") -> SSHPrivateKeyFile {
-        let key = Curve25519.Signing.PrivateKey()
-        let seed = key.rawRepresentation
-        let publicBytes = key.publicKey.rawRepresentation
-        let type = Data("ssh-ed25519".utf8)
+    /// A new key without a passphrase, in OpenSSH format.
+    public static func generate(_ algorithm: SSHKeyAlgorithm, comment: String = "") throws(SSHKeyError) -> SSHPrivateKeyFile {
+        switch algorithm.type {
+        case .ed25519:
+            let key = Curve25519.Signing.PrivateKey()
+            let publicBytes = key.publicKey.rawRepresentation
+            return openSSH(
+                type: "ssh-ed25519", publicFields: [publicBytes],
+                privateFields: [publicBytes, key.rawRepresentation + publicBytes], comment: comment
+            )
+        case .ecdsa:
+            let (point, scalar): (Data, Data) = switch algorithm.bits {
+            case 384: P384.Signing.PrivateKey().withRepresentations
+            case 521: P521.Signing.PrivateKey().withRepresentations
+            default: P256.Signing.PrivateKey().withRepresentations
+            }
+            let curve = Data(algorithm.curveName.utf8)
+            return openSSH(
+                type: algorithm.sshName, publicFields: [curve, point],
+                privateFields: [curve, point, mpint(scalar)], comment: comment
+            )
+        case .rsa:
+            let attributes: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeRSA, kSecAttrKeySizeInBits: algorithm.bits]
+            var error: Unmanaged<CFError>?
+            guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error),
+                  let der = SecKeyCopyExternalRepresentation(key, &error) as Data?,
+                  // PKCS #1: version, n, e, d, p, q, d mod (p-1), d mod (q-1), q⁻¹ mod p.
+                  let integers = DERReader.integers(inSequence: der), integers.count == 9
+            else { throw .storage(code: Int32(truncatingIfNeeded: error.map { CFErrorGetCode($0.takeRetainedValue()) } ?? -1)) }
+            let (n, e, d, p, q, iqmp) = (integers[1], integers[2], integers[3], integers[4], integers[5], integers[8])
+            return openSSH(type: "ssh-rsa", publicFields: [e, n], privateFields: [n, e, d, iqmp, p, q], comment: comment)
+        }
+    }
 
+    /// A Secure Enclave key's public half as SSH names it, for one made by ``HardwareKeys``.
+    static func hardwarePublicKey(x963 point: Data) -> Data {
         var publicKey = WireWriter()
-        publicKey.string(type)
-        publicKey.string(publicBytes)
+        publicKey.string(Data(SSHKeyAlgorithm.secureEnclave.sshName.utf8))
+        publicKey.string(Data(SSHKeyAlgorithm.secureEnclave.curveName.utf8))
+        publicKey.string(point)
+        return publicKey.data
+    }
+
+    /// An unencrypted OpenSSH private key file. The fields are the key type's own, as wire-format
+    /// strings (an mpint is a string of its two's-complement bytes).
+    private static func openSSH(type: String, publicFields: [Data], privateFields: [Data], comment: String) -> SSHPrivateKeyFile {
+        let typeName = Data(type.utf8)
+        var publicKey = WireWriter()
+        publicKey.string(typeName)
+        for field in publicFields { publicKey.string(field) }
 
         var secret = WireWriter()
         let check = UInt32.random(in: .min ... .max)
         secret.uint32(check)
         secret.uint32(check)
-        secret.string(type)
-        secret.string(publicBytes)
-        secret.string(seed + publicBytes)
+        secret.string(typeName)
+        for field in privateFields { secret.string(field) }
         secret.string(Data(comment.utf8))
         // Padded to the cipher's block size (8 for "none") with 1, 2, 3, …
         var pad: UInt8 = 1
@@ -188,7 +311,15 @@ public struct SSHPrivateKeyFile: Sendable, Hashable {
         file.uint32(1)
         file.string(publicKey.data)
         file.string(secret.data)
-        return SSHPrivateKeyFile(type: "ssh-ed25519", publicKey: publicKey.data, isEncrypted: false, comment: comment, text: armor(file.data))
+        return SSHPrivateKeyFile(type: type, publicKey: publicKey.data, isEncrypted: false, comment: comment, text: armor(file.data))
+    }
+
+    /// An unsigned big-endian number as an mpint's bytes: no leading zeros, and one zero in front
+    /// when the top bit is set.
+    static func mpint(_ unsigned: some Collection<UInt8>) -> Data {
+        var bytes = Data(unsigned.drop { $0 == 0 })
+        if let first = bytes.first, first & 0x80 != 0 { bytes.insert(0, at: 0) }
+        return bytes
     }
 
     /// "SHA256:" and the unpadded base64 digest of the public key, as `ssh-keygen -l` prints it.
@@ -222,6 +353,44 @@ private struct WireReader {
     }
 }
 
+/// Reads the integers of a DER sequence, such as an RSA private key in PKCS #1 form. A DER integer's
+/// bytes are already an mpint's.
+private enum DERReader {
+    static func integers(inSequence der: Data) -> [Data]? {
+        var rest = der[...]
+        guard rest.popFirst() == 0x30, let length = Self.length(&rest), rest.count == length else { return nil }
+        var integers: [Data] = []
+        while !rest.isEmpty {
+            guard rest.popFirst() == 0x02, let length = Self.length(&rest), rest.count >= length else { return nil }
+            integers.append(Data(rest.prefix(length)))
+            rest = rest.dropFirst(length)
+        }
+        return integers
+    }
+
+    private static func length(_ rest: inout Data.SubSequence) -> Int? {
+        guard let first = rest.popFirst() else { return nil }
+        guard first & 0x80 != 0 else { return Int(first) }
+        let count = Int(first & 0x7F)
+        guard (1...4).contains(count), rest.count >= count else { return nil }
+        let value = rest.prefix(count).reduce(0) { $0 << 8 | Int($1) }
+        rest = rest.dropFirst(count)
+        return value
+    }
+}
+
+extension P256.Signing.PrivateKey {
+    fileprivate var withRepresentations: (point: Data, scalar: Data) { (publicKey.x963Representation, rawRepresentation) }
+}
+
+extension P384.Signing.PrivateKey {
+    fileprivate var withRepresentations: (point: Data, scalar: Data) { (publicKey.x963Representation, rawRepresentation) }
+}
+
+extension P521.Signing.PrivateKey {
+    fileprivate var withRepresentations: (point: Data, scalar: Data) { (publicKey.x963Representation, rawRepresentation) }
+}
+
 private struct WireWriter {
     var data = Data()
 
@@ -237,6 +406,56 @@ private struct WireWriter {
 
 // MARK: - Store
 
+/// Where a new key is kept, and who may use it.
+public struct SSHKeyStorage: Sendable, Hashable, Codable {
+    private var enclave: Bool
+    private var secret: SecretProtection
+
+    public init(isInSecureEnclave: Bool = false, protection: SecretProtection = .standard) {
+        enclave = false
+        secret = protection
+        self.isInSecureEnclave = isInSecureEnclave
+    }
+
+    /// The private key is made in this device's Secure Enclave and never leaves it: it is an ECDSA
+    /// P-256 key, and cannot be backed up, synchronised or restored. Turning it on takes the key out
+    /// of backups and iCloud Keychain.
+    public var isInSecureEnclave: Bool {
+        get { enclave }
+        set {
+            enclave = newValue
+            if newValue { secret.includedInBackups = false }
+        }
+    }
+
+    /// Who may use the key and where copies of it go. Backups or iCloud Keychain take it out of the
+    /// Secure Enclave, which keeps it on this device.
+    public var protection: SecretProtection {
+        get { secret }
+        set {
+            secret = newValue
+            if newValue.includedInBackups || newValue.synchronizes { enclave = false }
+        }
+    }
+}
+
+extension SSHKeyStorage {
+    /// What sets the key apart from one kept on this device alone, in a few words:
+    /// "Backed Up · Face ID", "Secure Enclave". `nil` for a key kept on this device alone.
+    public func summary(ownerCheck: OwnerCheck) -> String? {
+        var parts: [String] = []
+        if isInSecureEnclave { parts.append(String(localized: "Secure Enclave", bundle: #bundle)) }
+        // iCloud Keychain implies backups.
+        if protection.synchronizes {
+            parts.append(String(localized: "iCloud Keychain", bundle: #bundle))
+        } else if protection.includedInBackups {
+            parts.append(String(localized: "Backed Up", bundle: #bundle))
+        }
+        if protection.requiresUserPresence { parts.append(ownerCheck.name) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
 /// What the app shows about a stored SSH key. Never includes the private half.
 public struct SSHKeyInfo: Sendable, Hashable, Codable, Identifiable {
     /// The user's name for the key; what ``ComputerConfiguration/Tunnel/keyName`` refers to.
@@ -248,18 +467,29 @@ public struct SSHKeyInfo: Sendable, Hashable, Codable, Identifiable {
     public var isEncrypted: Bool
     public var comment: String
     public var created: Date
+    public var storage: SSHKeyStorage
 
     public var id: String { name }
 
-    /// "Ed25519", "RSA", "ECDSA P-256", or "SSH Key" when the file does not say.
+    /// "Ed25519", "RSA 3072", "ECDSA P-256", or "SSH Key" when the file does not say.
     public var typeName: String {
         switch type {
         case "ssh-ed25519": "Ed25519"
-        case "ssh-rsa": "RSA"
+        case "ssh-rsa": rsaBits.map { "RSA \($0)" } ?? "RSA"
         case "ecdsa": "ECDSA"
         case _ where type.hasPrefix("ecdsa-sha2-nistp"): "ECDSA P-" + type.dropFirst("ecdsa-sha2-nistp".count)
         default: String(localized: "SSH Key", bundle: #bundle)
         }
+    }
+
+    /// The size of an RSA key's modulus, from its public key.
+    private var rsaBits: Int? {
+        guard let publicKey else { return nil }
+        var reader = WireReader(publicKey)
+        guard reader.string() != nil, reader.string() != nil, let modulus = reader.string() else { return nil }
+        let bytes = modulus.drop { $0 == 0 }
+        guard let first = bytes.first else { return nil }
+        return (bytes.count - 1) * 8 + (8 - first.leadingZeroBitCount)
     }
 
     /// The line to add to `~/.ssh/authorized_keys` on a machine that should accept this key.
@@ -270,22 +500,34 @@ public struct SSHKeyInfo: Sendable, Hashable, Codable, Identifiable {
     }
 }
 
+/// How to sign in with a stored key.
+public enum SSHLoginKey: Sendable {
+    /// A private key file, which may still need its passphrase.
+    case file(Data)
+    /// A key that signs where it is kept.
+    case signer(SSHKeySigner)
+}
+
 /// The user's SSH keys, kept in the Keychain (through a ``SecretStore``) and shared by every saved
 /// computer that names one.
 ///
-/// Each private key is its own secret; a separate index secret lists names and public halves, so
-/// listing never reads private key material.
+/// Each key is two secrets: the private key, kept as the user chose, and a description of it (its
+/// kind, public key and storage), kept in the same places but never behind the owner check, so that
+/// listing keys reads no private key and asks no one. A Secure Enclave key's private secret is the
+/// enclave's handle to it, which is of use on this device only.
 public final class SSHKeyStore: Sendable {
     private let secrets: any SecretStore
-    /// Serialises changes to the index.
+    /// Where Secure Enclave keys are made and used.
+    public let hardware: any HardwareKeys
+    /// Serialises adding and removing keys.
     private let lock = Mutex<Void>(())
 
-    private static let indexKey = SecretKey(appWide: .sshKeyIndex, name: "index")
-
-    public init(secrets: any SecretStore) {
+    public init(secrets: any SecretStore, hardware: any HardwareKeys = SecureEnclaveKeys()) {
         self.secrets = secrets
+        self.hardware = hardware
     }
 
+    private static func infoKey(_ name: String) -> SecretKey { SecretKey(appWide: .sshKeyInfo, name: name) }
     private static func key(_ name: String) -> SecretKey { SecretKey(appWide: .sshPrivateKey, name: name) }
     private static func passphraseKey(_ name: String) -> SecretKey { SecretKey(appWide: .keyPassphrase, name: name) }
 
@@ -299,30 +541,24 @@ public final class SSHKeyStore: Sendable {
         }
     }
 
-    private func readIndex() throws(SSHKeyError) -> [SSHKeyInfo] {
-        guard let text = try storing({ try secrets.secret(for: Self.indexKey) }) else { return [] }
-        return try storing { try JSONDecoder().decode([SSHKeyInfo].self, from: Data(text.utf8)) }
-    }
-
-    private func writeIndex(_ index: [SSHKeyInfo]) throws(SSHKeyError) {
-        try storing {
-            let data = try JSONEncoder().encode(index)
-            try secrets.setSecret(String(decoding: data, as: UTF8.self), for: Self.indexKey)
-        }
-    }
-
     /// Every stored key, sorted by name.
     public func all() throws(SSHKeyError) -> [SSHKeyInfo] {
-        try readIndex().sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let names = try storing { try secrets.names(of: .sshKeyInfo) }
+        // A name can appear twice when a key synchronised from another device meets one of this
+        // device's: the first is shown.
+        var seen = Set<String>()
+        return names.compactMap { name in seen.insert(name).inserted ? key(named: name) : nil }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     public func key(named name: String) -> SSHKeyInfo? {
-        (try? readIndex())?.first { $0.name == name }
+        guard let text = (try? secrets.secret(for: Self.infoKey(name))) ?? nil else { return nil }
+        return try? JSONDecoder().decode(SSHKeyInfo.self, from: Data(text.utf8))
     }
 
     /// `base` if no key has that name yet, else "base 2", "base 3", …
     public func availableName(basedOn base: String) -> String {
-        let taken = Set(((try? readIndex()) ?? []).map(\.name))
+        let taken = Set((try? secrets.names(of: .sshKeyInfo)) ?? [])
         let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
         let stem = trimmed.isEmpty ? String(localized: "SSH Key", bundle: #bundle) : trimmed
         guard taken.contains(stem) else { return stem }
@@ -331,58 +567,132 @@ public final class SSHKeyStore: Sendable {
         return "\(stem) \(number)"
     }
 
+    /// The name a new key gets when it is given none.
+    public static func defaultName(for algorithm: SSHKeyAlgorithm, storage: SSHKeyStorage) -> String {
+        storage.isInSecureEnclave
+            ? String(localized: "Secure Enclave Key", bundle: #bundle)
+            : String(localized: "\(algorithm.title) Key", bundle: #bundle)
+    }
+
+    /// The name an imported key gets when it is given none.
+    public static var defaultImportName: String { String(localized: "Imported Key", bundle: #bundle) }
+
     /// Stores a private key the user pasted or picked: OpenSSH format, or PEM (RSA, EC, PKCS#8).
+    /// Without a name it gets an unused one.
     @discardableResult
-    public func importKey(named name: String, text: String, now: Date = Date()) throws(SSHKeyError) -> SSHKeyInfo {
-        try add(try SSHPrivateKeyFile(text: text), named: name, now: now)
+    public func importKey(named name: String? = nil, text: String, protection: SecretProtection = .standard, now: Date = Date()) throws(SSHKeyError) -> SSHKeyInfo {
+        let file = try SSHPrivateKeyFile(text: text)
+        return try add(named: name, defaultName: Self.defaultImportName, now: now) { name in
+            (file.text, Self.info(of: file, name: name, storage: SSHKeyStorage(protection: protection), now: now))
+        }
     }
 
-    /// Creates and stores a new Ed25519 key without a passphrase; the Keychain protects it.
+    /// Creates and stores a new key without a passphrase; the Keychain or the Secure Enclave
+    /// protects it. A Secure Enclave key is always ECDSA P-256. Without a name it gets an unused one.
     @discardableResult
-    public func generateEd25519(named name: String, now: Date = Date()) throws(SSHKeyError) -> SSHKeyInfo {
-        try add(SSHPrivateKeyFile.generateEd25519(comment: name.trimmingCharacters(in: .whitespacesAndNewlines)), named: name, now: now)
+    public func generate(
+        named name: String? = nil, algorithm: SSHKeyAlgorithm = .ed25519, storage: SSHKeyStorage = SSHKeyStorage(), now: Date = Date()
+    ) throws(SSHKeyError) -> SSHKeyInfo {
+        let algorithm = storage.isInSecureEnclave ? .secureEnclave : algorithm
+        return try add(named: name, defaultName: Self.defaultName(for: algorithm, storage: storage), now: now) { name throws(SSHKeyError) in
+            if storage.isInSecureEnclave {
+                guard hardware.isAvailable else { throw .secureEnclaveUnavailable }
+                let made: (handle: Data, publicKey: Data)
+                do {
+                    made = try hardware.makeKey(requiresUserPresence: storage.protection.requiresUserPresence)
+                } catch {
+                    throw .secureEnclaveUnavailable
+                }
+                let publicKey = SSHPrivateKeyFile.hardwarePublicKey(x963: made.publicKey)
+                let info = SSHKeyInfo(
+                    name: name, type: algorithm.sshName, publicKey: publicKey, fingerprint: SSHPrivateKeyFile.fingerprint(of: publicKey),
+                    isEncrypted: false, comment: name, created: now, storage: storage
+                )
+                return (made.handle.base64EncodedString(), info)
+            }
+            let file = try SSHPrivateKeyFile.generate(algorithm, comment: name)
+            return (file.text, Self.info(of: file, name: name, storage: storage, now: now))
+        }
     }
 
-    private func add(_ file: SSHPrivateKeyFile, named rawName: String, now: Date) throws(SSHKeyError) -> SSHKeyInfo {
-        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { throw .invalidName }
-        let info = SSHKeyInfo(
+    private static func info(of file: SSHPrivateKeyFile, name: String, storage: SSHKeyStorage, now: Date) -> SSHKeyInfo {
+        SSHKeyInfo(
             name: name, type: file.type, publicKey: file.publicKey, fingerprint: file.fingerprint,
-            isEncrypted: file.isEncrypted, comment: file.comment, created: now
+            isEncrypted: file.isEncrypted, comment: file.comment, created: now, storage: storage
         )
-        return try lock.withLock { _ throws(SSHKeyError) in
-            var index = try readIndex()
-            guard !index.contains(where: { $0.name == name }) else { throw .nameInUse(name) }
-            // The key first: an entry in the index must never point at nothing.
-            try storing { try secrets.setSecret(file.text, for: Self.key(name)) }
+    }
+
+    private func add(
+        named rawName: String?, defaultName: String, now: Date, make: (String) throws(SSHKeyError) -> (secret: String, info: SSHKeyInfo)
+    ) throws(SSHKeyError) -> SSHKeyInfo {
+        try lock.withLock { _ throws(SSHKeyError) in
+            let typed = rawName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let name = typed.isEmpty ? availableName(basedOn: defaultName) : typed
+            guard !secrets.hasSecret(for: Self.infoKey(name)) else { throw .nameInUse(name) }
+            let (secret, info) = try make(name)
+            let protection = info.storage.protection
+            let infoText = try storing { String(decoding: try JSONEncoder().encode(info), as: UTF8.self) }
+            // The key first: a description must never point at nothing.
+            try storing { try secrets.setSecret(secret, for: Self.key(name), protection: protection) }
             // A passphrase left behind by an earlier key of the same name is not this key's.
             try? secrets.removeSecret(for: Self.passphraseKey(name))
-            index.append(info)
-            try writeIndex(index)
+            do throws(SSHKeyError) {
+                try storing { try secrets.setSecret(infoText, for: Self.infoKey(name), protection: protection.withoutUserPresence) }
+            } catch {
+                try? secrets.removeSecret(for: Self.key(name))
+                throw error
+            }
             return info
         }
     }
 
-    /// Removes a key and its remembered passphrase. Computers that name it fall back to passwords.
+    /// Removes a key and its remembered passphrase, here and, for a key in iCloud Keychain, on the
+    /// user's other devices. Computers that name it fall back to passwords.
     public func delete(named name: String) throws(SSHKeyError) {
         try lock.withLock { _ throws(SSHKeyError) in
-            var index = try readIndex()
-            index.removeAll { $0.name == name }
-            try writeIndex(index)
+            try storing { try secrets.removeSecret(for: Self.infoKey(name)) }
             try storing { try secrets.removeSecret(for: Self.key(name)) }
             try? secrets.removeSecret(for: Self.passphraseKey(name))
         }
     }
 
-    /// The private key file, for logging in. `nil` if there is no key of that name.
+    /// The key to sign in with, unlocked through `access` if it requires the device owner. `nil` if
+    /// there is no key of that name, or the owner did not agree.
+    public func loginKey(named name: String, access: SecretAccess, reason: String) async -> SSHLoginKey? {
+        guard let info = key(named: name) else { return nil }
+        guard let secret = try? await secrets.unlockedSecret(for: Self.key(name), access: access, reason: reason) else { return nil }
+        guard info.storage.isInSecureEnclave else { return .file(Data(secret.utf8)) }
+        guard let handle = Data(base64Encoded: secret), let publicKey = info.publicKey else { return nil }
+        // The enclave asks no one by itself: the owner agrees before the server is contacted.
+        if info.storage.protection.requiresUserPresence, await !access.authenticate(reason: reason) { return nil }
+        let hardware = hardware
+        return .signer(SSHKeySigner(publicKey: publicKey) { data in
+            hardware.sign(data, handle: handle, access: access).map(SSHAuthentication.ecdsaSignature(raw:))
+        })
+    }
+
+    /// The private key file, for tests and tools. `nil` if there is none, or it needs the owner.
     public func privateKey(named name: String) throws(SSHKeyError) -> Data? {
-        try storing { try secrets.secret(for: Self.key(name)) }.map { Data($0.utf8) }
+        do {
+            return try secrets.secret(for: Self.key(name)).map { Data($0.utf8) }
+        } catch SecretStoreError.authenticationRequired {
+            return nil
+        } catch SecretStoreError.storeFailure(let code) {
+            throw .storage(code: code)
+        } catch {
+            throw .storage(code: -1)
+        }
+    }
+
+    /// How a passphrase remembered for the key is kept: as the key itself is.
+    public func passphraseProtection(for name: String) -> SecretProtection {
+        key(named: name)?.storage.protection ?? .thisDeviceOnly
     }
 
     /// Whether a passphrase is remembered for the key. The passphrase itself is only ever read by
     /// the ``PromptBroker``, when the key is used.
     public func hasRememberedPassphrase(for name: String) -> Bool {
-        ((try? secrets.secret(for: Self.passphraseKey(name))) ?? nil) != nil
+        secrets.hasSecret(for: Self.passphraseKey(name))
     }
 
     public func forgetPassphrase(for name: String) {

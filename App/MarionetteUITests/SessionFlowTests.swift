@@ -264,7 +264,7 @@ final class SessionFlowTests: XCTestCase {
     }
 
     @MainActor
-    func testSettingsSSHKeysAndKnownHosts() {
+    func testSettingsInputAndClipboard() {
         let app = XCUIApplication.marionette()
         app.buttons["computer-Studio Mac"].waitToExist()
         openLibraryMenuItem(app, "Settings")
@@ -272,16 +272,91 @@ final class SessionFlowTests: XCTestCase {
         XCTAssertEqual(natural.value as? String, "1", "natural scrolling is on by default")
         app.buttons["Automatically"].waitToExist().tap()
         app.buttons["When You Paste"].waitToExist().tap()
-        app.buttons["SSH Keys"].waitToExist().tap()
+        XCTAssertFalse(app.buttons["SSH Keys"].exists, "SSH keys have their own page")
+    }
+
+    @MainActor
+    func testSSHKeysAreMadeImportedAndListed() {
+        let app = XCUIApplication.marionette()
+        app.buttons["computer-Studio Mac"].waitToExist()
+        openLibraryMenuItem(app, "SSH Keys")
         app.staticTexts["No SSH Keys"].waitToExist()
-        app.buttons["Generate a Key"].firstMatch.tap()
-        app.element("ssh-key-Marionette Key").waitToExist()
+
+        // A new key: an older type warns about its strength, and an unnamed key gets a generic name.
+        app.buttons["New Key"].firstMatch.waitToExist().tap()
+        app.navigationBars["New SSH Key"].waitToExist()
+        app.buttons["ssh-key-type"].waitToExist().tap()
+        app.buttons["RSA"].waitToExist().tap()
+        app.buttons["ssh-key-strength"].waitToExist().tap()
+        app.buttons["1024"].waitToExist().tap()
+        app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "A 1024-bit RSA key can be broken.")).firstMatch.waitToExist()
+        app.buttons["Create"].tap()
+        app.element("ssh-key-RSA 1024 Key").waitToExist()
         XCTAssertTrue(app.buttons["Copy Public Key"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "SHA256:")).firstMatch.exists)
-        let back = app.buttons["BackButton"].exists ? app.buttons["BackButton"] : app.navigationBars.buttons["Settings"]
-        back.firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["Backed Up"].exists, "backed up, and out of iCloud Keychain, unless chosen")
+
+        // The Secure Enclave keeps a key out of backups and iCloud Keychain.
+        app.buttons["add-ssh-key"].tap()
+        app.buttons["New Key"].waitToExist().tap()
+        app.staticTexts["Storage"].waitToExist().tap()
+        let enclave = app.switches["secure-enclave"].waitToExist()
+        flip(enclave)
+        XCTAssertEqual(app.switches["include-in-backups"].value as? String, "0")
+        XCTAssertEqual(app.switches["include-in-icloud"].value as? String, "0")
+        app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "The key is stored in the Secure Enclave")).firstMatch.waitToExist()
+        flip(app.switches["require-owner"])
+        app.textFields["ssh-key-name"].tap()
+        app.textFields["ssh-key-name"].typeText("Enclave")
+        app.buttons["Create"].tap()
+        app.element("ssh-key-Enclave").waitToExist()
+        XCTAssertTrue(app.staticTexts["Secure Enclave · Face ID"].exists)
+
+        // What is not a private key is refused, in the form.
+        app.buttons["add-ssh-key"].tap()
+        app.buttons["Import Existing Key"].waitToExist().tap()
+        app.navigationBars["Import SSH Key"].waitToExist()
+        XCTAssertFalse(app.buttons["Import"].isEnabled, "nothing pasted yet")
+        XCTAssertTrue(app.buttons["choose-ssh-key-file"].exists)
+        let text = app.textViews["ssh-key-text"].waitToExist()
+        text.tap()
+        text.typeText("ssh-ed25519 AAAA not-a-private-key")
+        app.buttons["Import"].tap()
+        app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "This isn’t an SSH private key.")).firstMatch.waitToExist()
+        app.buttons["Cancel"].tap()
+
         app.buttons["Known Hosts"].waitToExist().tap()
         app.staticTexts["No Known Hosts"].waitToExist()
+    }
+
+    @MainActor
+    func testPasswordSecurityKeepsPasswordsOnThisDevice() {
+        let app = XCUIApplication.marionette()
+        app.buttons["computer-Studio Mac"].waitToExist().press(forDuration: 1.0)
+        app.buttons["Edit"].waitToExist().tap()
+        app.staticTexts["Password Security"].waitToExist().tap()
+        let owner = app.switches["require-owner"].waitToExist()
+        let backups = app.switches["include-in-backups"]
+        XCTAssertEqual(owner.value as? String, "0")
+        XCTAssertEqual(backups.value as? String, "1")
+        XCTAssertFalse(app.switches["include-in-icloud"].exists, "passwords stay out of iCloud Keychain")
+        flip(owner)
+        XCTAssertEqual(owner.value as? String, "1")
+        XCTAssertEqual(backups.value as? String, "1", "Face ID and backups go together")
+
+        // Without a password there is nothing to keep.
+        let password = app.secureTextFields["password"]
+        password.tap()
+        password.press(forDuration: 1.2)
+        if app.menuItems["Select All"].waitForExistence(timeout: 2) { app.menuItems["Select All"].tap() }
+        password.typeText(XCUIKeyboardKey.delete.rawValue)
+        XCTAssertFalse(app.switches["require-owner"].isEnabled)
+    }
+
+    /// Taps a switch where its control is: tapping a form row's title does not toggle it.
+    @MainActor
+    private func flip(_ toggle: XCUIElement) {
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
     }
 
     @MainActor
@@ -406,7 +481,7 @@ final class SessionFlowTests: XCTestCase {
         // A plain key first: the simulator drops the first modified key after a launch.
         app.typeKey("b", modifierFlags: [])
         app.typeKey(",", modifierFlags: .command)
-        app.buttons["SSH Keys"].waitToExist()
+        app.switches["natural-scrolling"].waitToExist()
         app.buttons["Done"].tap()
         app.typeKey("n", modifierFlags: .command)
         app.textFields["address"].waitToExist()

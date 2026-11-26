@@ -12,6 +12,7 @@ struct LibraryActions {
     var newComputer: () -> Void
     var lookAgain: () -> Void
     var showSettings: () -> Void
+    var showSSHKeys: () -> Void
     var showHelp: () -> Void
 }
 
@@ -87,6 +88,8 @@ struct MarionetteCommands: Commands {
         CommandGroup(replacing: .appSettings) {
             Button("Settings…") { library?.showSettings() }
                 .keyboardShortcut(",", modifiers: .command)
+                .disabled(library == nil)
+            Button("SSH Keys…") { library?.showSSHKeys() }
                 .disabled(library == nil)
         }
         CommandMenu("Session") {

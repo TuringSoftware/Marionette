@@ -103,13 +103,27 @@ final class ScreenshotTests: XCTestCase {
             app.buttons["computer-Studio Mac"].waitToExist().press(forDuration: 1.0)
             app.buttons["Edit"].waitToExist().tap()
             app.element("address").waitToExist()
-            app.staticTexts["Display"].waitToExist().tap()
+            let display = app.staticTexts["Display"]
+            for _ in 0..<4 where !display.isHittable { app.swipeUp() }
+            display.waitToExist().tap()
             // The options belong to Fit This Device.
             XCTAssertFalse(app.switches["retina-display"].exists)
             app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Show")).firstMatch.waitToExist().tap()
             app.buttons["Fit This Device"].waitToExist().tap()
+            let secondary = app.switches["secondary-display"]
+            for _ in 0..<4 where !secondary.isHittable { app.swipeUp() }
             app.switches["retina-display"].waitToExist()
-            app.switches["secondary-display"].waitToExist()
+            secondary.waitToExist()
+        }
+    }
+
+    @MainActor
+    func testEditorPasswordSecurity() {
+        capture("04c-editor-password-security") { app in
+            app.buttons["computer-Studio Mac"].waitToExist().press(forDuration: 1.0)
+            app.buttons["Edit"].waitToExist().tap()
+            app.staticTexts["Password Security"].waitToExist().tap()
+            app.switches["include-in-backups"].waitToExist()
         }
     }
 
@@ -258,15 +272,27 @@ final class ScreenshotTests: XCTestCase {
             app.buttons["computer-Studio Mac"].waitToExist()
             if !app.buttons["Settings"].exists { app.buttons["More"].firstMatch.tap() }
             app.buttons["Settings"].waitToExist().tap()
-            app.buttons["SSH Keys"].waitToExist()
+            app.switches["natural-scrolling"].waitToExist()
         }
-        capture("27-settings-ssh-keys") { app in
-            app.buttons["computer-Studio Mac"].waitToExist()
-            if !app.buttons["Settings"].exists { app.buttons["More"].firstMatch.tap() }
-            app.buttons["Settings"].waitToExist().tap()
-            app.buttons["SSH Keys"].waitToExist().tap()
-            app.buttons["Generate a Key"].firstMatch.waitToExist().tap()
-            app.element("ssh-key-Marionette Key").waitToExist()
+        capture("27-ssh-keys") { app in
+            libraryAction(app, "SSH Keys")
+            app.buttons["New Key"].firstMatch.waitToExist().tap()
+            app.buttons["Create"].waitToExist().tap()
+            app.element("ssh-key-Ed25519 Key").waitToExist()
+        }
+        capture("27b-ssh-key-new") { app in
+            libraryAction(app, "SSH Keys")
+            app.buttons["New Key"].firstMatch.waitToExist().tap()
+            app.buttons["ssh-key-type"].waitToExist().tap()
+            app.buttons["RSA"].waitToExist().tap()
+            app.staticTexts["Storage"].waitToExist().tap()
+            app.switches["include-in-icloud"].waitToExist()
+        }
+        capture("27c-ssh-key-import") { app in
+            libraryAction(app, "SSH Keys")
+            app.buttons["add-ssh-key"].waitToExist().tap()
+            app.buttons["Import Existing Key"].waitToExist().tap()
+            app.textViews["ssh-key-text"].waitToExist()
         }
     }
 
@@ -383,12 +409,10 @@ final class ScreenshotTests: XCTestCase {
 
     @MainActor
     func testSettingsSubpages() {
-        capture("35-settings-known-hosts") { app in
-            libraryAction(app, "Settings")
-            let knownHosts = app.buttons["Known Hosts"]
-            app.buttons["SSH Keys"].waitToExist()
-            for _ in 0..<4 where !knownHosts.isHittable { app.swipeUp() }
-            knownHosts.waitToExist().tap()
+        capture("35-ssh-keys-known-hosts") { app in
+            libraryAction(app, "SSH Keys")
+            app.buttons["Known Hosts"].waitToExist().tap()
+            app.staticTexts["No Known Hosts"].waitToExist()
         }
         capture("36-settings-licences") { app in
             libraryAction(app, "Settings")

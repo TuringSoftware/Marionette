@@ -35,12 +35,28 @@ public actor InMemoryHostKeyStore: HostKeyStore {
     public func remember(_ key: KnownHostKey, for server: Endpoint) { keys[server] = key }
 }
 
+/// A key whose private half never leaves where it is kept, such as a Secure Enclave.
+public struct SSHKeySigner: Sendable {
+    /// The public key in SSH wire format.
+    public var publicKey: Data
+    /// Signs data for the server, returning the signature in SSH's form for the key's algorithm, or
+    /// `nil` when the key cannot be used (for one that needs the device owner, before they agreed).
+    public var sign: @Sendable (Data) -> Data?
+
+    public init(publicKey: Data, sign: @escaping @Sendable (Data) -> Data?) {
+        self.publicKey = publicKey
+        self.sign = sign
+    }
+}
+
 /// How to log in to an SSH server.
 public struct SSHLogin: Sendable {
     public var server: Endpoint
     public var username: String
     /// A private key in OpenSSH or PEM format. Tried before asking for a password.
     public var privateKey: Data?
+    /// A key that signs without handing over its private half. Tried before asking for a password.
+    public var signer: SSHKeySigner?
     /// Shown in the passphrase prompt if the key needs one.
     public var keyName: String
     /// What the password and passphrase prompts say the login is for.
@@ -86,6 +102,7 @@ public enum SSHConnectionError: Error, Sendable, Equatable {
 enum ReplayableLogin: Sendable {
     case none
     case privateKey(Data, passphrase: String?)
+    case signer(SSHKeySigner)
     case password(String)
 }
 
@@ -235,6 +252,20 @@ public final class SSHConnection: Sendable {
         }
         if methods.isEmpty { return ReplayableLogin.none }
 
+        if let signer = login.signer, methods.contains("publickey") {
+            do {
+                try await watchdog.guarding {
+                    try await session.authenticate(username: login.username, with: .signer(publicKey: signer.publicKey, sign: signer.sign))
+                }
+                return .signer(signer)
+            } catch SSHError.authenticationFailed, SSHError.unusableKey {
+                // The server does not know the key, or it could not sign: a password may still do.
+            } catch {
+                throw .failed(String(localized: "SSH key login failed: \(String(describing: error))", bundle: #bundle))
+            }
+            methods = (try? await watchdog.guarding { try await session.authenticationMethods(for: login.username) }) ?? methods
+        }
+
         if let key = login.privateKey, methods.contains("publickey") {
             var passphrase: String?
             for attempt in 1...4 {
@@ -354,6 +385,8 @@ public final class SSHConnection: Sendable {
                     _ = try await session.authenticationMethods(for: username)
                 case .privateKey(let key, let passphrase):
                     try await session.authenticate(username: username, with: .privateKey(key, passphrase: passphrase))
+                case .signer(let signer):
+                    try await session.authenticate(username: username, with: .signer(publicKey: signer.publicKey, sign: signer.sign))
                 case .password(let password):
                     try await session.authenticate(username: username, with: .password(password))
                 }
