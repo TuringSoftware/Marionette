@@ -3,6 +3,7 @@
 
 @testable import ARDProtocol
 @testable import AppleScreenSharing
+import ARDCrypto
 import CoreVideo
 import Foundation
 import RemoteDesktopConformance
@@ -292,30 +293,74 @@ private func expected(width: Int, height: Int, generation: (Int, Int) -> Int = {
         await session.disconnect()
     }
 
-    /// screensharingd on macOS 15.6, reading the login type and SRP's first message together, can
-    /// loop on "SRP invalid step" until restarted, so the type goes alone.
-    @Test func theSRPLoginTypeGoesAloneBeforeTheFirstMessage() async throws {
+    /// screensharingd reads SRP's first message according to what came with the type byte, and on
+    /// macOS 15.6 never recovers from misreading it: the viewer sends both in one write.
+    @Test func theSRPLoginTypeAndFirstMessageAreReadTogether() async throws {
         var options = Self.offersSRP
-        options.needsTheLoginTypeAlone = true
+        options.loopsOnAMisreadFirstMessage = true
         let transport = ScriptedMacTransport(options: options)
         let session = try await AppleScreenSharingBackend().connect(request(transport))
         let mac = transport.latest
-        #expect(!mac.record.withLock { $0.loginTypeArrivedWithMessage })
+        #expect(!mac.record.withLock { $0.misreadFirstMessage })
         #expect(mac.record.withLock { $0.srpLogins.map(\.proofAccepted) } == [true])
         await session.disconnect()
     }
 
-    /// The Mac above does notice when they come together, so the test before this one means something.
-    @Test func withoutThePauseTheLoginTypeAndMessageArriveTogether() async throws {
+    /// A writer held up for a while, as on a busy device, still sends the type and message 1 so
+    /// that the Mac reads them right.
+    @Test func aHeldUpWriterStillSendsAFirstMessageTheMacReadsRight() async throws {
+        /// Stalls once, at the first write after the version, for longer than a viewer might pause
+        /// after the login type, then catches up.
+        final class HeldUp: ByteStream {
+            let base: any ByteStream
+            private let writes = Mutex(0)
+            init(base: any ByteStream) { self.base = base }
+            func read(upTo maxLength: Int) async throws -> Data? { try await base.read(upTo: maxLength) }
+            func write(_ data: Data) async throws {
+                if writes.withLock({ $0 += 1; return $0 }) == 2 { try await Task.sleep(for: .milliseconds(400)) }
+                try await base.write(data)
+            }
+            func close() async { await base.close() }
+        }
         var options = Self.offersSRP
-        options.needsTheLoginTypeAlone = true
+        options.loopsOnAMisreadFirstMessage = true
+        let transport = ScriptedMacTransport(options: options)
+        let connection = ARDConnection(stream: HeldUp(base: try await transport.openStream(port: 5900)))
+        _ = try await connection.logIn(username: "tester", password: "s3cret")
+        #expect(!transport.latest.record.withLock { $0.misreadFirstMessage })
+        #expect(transport.latest.record.withLock { $0.srpLogins.map(\.proofAccepted) } == [true])
+        await connection.close()
+    }
+
+    /// The Mac modelled above misreads what a Mac misreads, so the test before this one means
+    /// something: the type byte alone followed by message 1 is read either way they arrive.
+    @Test(arguments: [true, false])
+    func theTypeAloneThenMessageOneIsMisreadOnlyWhenTheyArriveTogether(together: Bool) async throws {
+        var options = Self.offersSRP
+        options.loopsOnAMisreadFirstMessage = true
         let transport = ScriptedMacTransport(options: options)
         let stream = try await transport.openStream(port: 5900)
-        var configuration = ARDConnection.Configuration()
-        configuration.pauseAfterLoginType = .zero
-        let connection = ARDConnection(stream: stream, configuration: configuration)
-        await #expect(throws: (any Error).self) { _ = try await connection.logIn(username: "tester", password: "s3cret") }
-        #expect(transport.latest.record.withLock { $0.loginTypeArrivedWithMessage })
+        var version = Data()
+        while version.count < 12, let chunk = try await stream.read(upTo: 12 - version.count) { version.append(chunk) }
+        try await stream.write(version)
+        var offered = Data()
+        while offered.count < 1 + Int(offered.first ?? 0) {
+            guard let chunk = try await stream.read(upTo: 64) else { break }
+            offered.append(chunk)
+        }
+        let message = try SRPLogin.firstMessage(username: "tester")
+        if together {
+            try await stream.write(Data([36]) + message)
+        } else {
+            try await stream.write(Data([36]))
+            try await Task.sleep(for: .milliseconds(100))
+            try await stream.write(message)
+        }
+        // The Mac answers message 1 with its challenge, or closes the connection.
+        let answer = try await stream.read(upTo: 4)
+        #expect((answer == nil) == together)
+        #expect(transport.latest.record.withLock { $0.misreadFirstMessage } == together)
+        await stream.close()
     }
 
     @Test func aWrongPasswordOverSRPIsAskedForAgain() async throws {

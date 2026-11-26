@@ -98,7 +98,7 @@ wrong way round, and leaves out the repeated type byte and the buffer's own leng
 
 | Step | Contents |
 |---|---|
-| Message 1 (viewer) | The type byte `36` again, a `u32` length, then a SASL buffer `{ utf8(U) utf8(I) utf8(sid) os(cn) }`. **U and I are both the account name**; sid and cn are empty. With either name empty the Mac does not find the account. |
+| Message 1 (viewer) | Read after the type byte alone: the type byte `36` again, then a `u32` length; read with the type byte: the length at once (see below). Then a SASL buffer `{ utf8(U) utf8(I) utf8(sid) os(cn) }`. **U and I are both the account name**; sid and cn are empty. With either name empty the Mac does not find the account. |
 | Message 2 (Mac) | A `u32` length, then `{ 0 mpi(N) mpi(g) os(salt) mpi(B) u64(iterations) utf8(L) }`. N and g are RFC 5054's 4096-bit group. L is `mda=SHA-512,replay_detection,conf+int=ChaCha20-Poly1305,kdf=SALTED-SHA512-PBKDF2`. |
 | Message 3 (viewer) | A `u32` length and `{ mpi(A) os(M1) utf8(o) os(cIV) }`, **without a type byte**. `o` must include `replay_detection` (else "abort: SRP not using replay detection") and `kdf=SALTED-SHA512-PBKDF2` (else "Error initializing security layer"), for example `mda=SHA-512,replay_detection,kdf=SALTED-SHA512-PBKDF2`. |
 | Message 4 (Mac) | A `u32` length and `{ os(M2) os(sIV) utf8(sid) u32(ttl) }`, then result word 0. A wrong proof gets result word `1` alone. |
@@ -120,21 +120,26 @@ After the login the rekey is wrapped under the first 16 bytes of `SHA-256(K)` (a
 says); the ChaCha20-Poly1305 security layer is not used. Initialisation and the record layer are as
 after type 30.
 
-**The type byte must arrive by itself.** `screensharingd` reads whatever has arrived and, seeing type
-36, takes message 1's length from the bytes after it. When the type byte and message 1 arrive in one
-read:
+**How message 1 is read depends on what came with the type byte** (Mac log, macOS 15.6 and 27).
+`screensharingd` reads whatever has arrived. Reading the type byte `36` alone, it expects message 1 to
+start with the type byte again; reading the type byte with bytes behind it, it takes them to start
+with message 1's `u32` length. So the type byte and message 1 sent in one write (`36`, the length,
+the buffer: the same bytes as the type byte followed by a message 1 without its own type byte) are
+always read right, on both systems. Sent apart, `36` and then `36` with the message, they are read
+right only if they also arrive apart; together, the second `36` is taken as part of the length:
 
 - macOS 27 logs "Invalid SRP data length 603979776" (`24 00 00 00`), steps one byte on and recovers;
 - macOS 15.6 consumes five bytes, lands inside message 1 and loops on "SRP invalid step" without
   consuming anything: over a million log lines, several cores busy, an assertion that keeps the Mac
   awake, and every later login to that daemon closed during authentication until
-  `sudo launchctl kickstart -k system/com.apple.screensharing`. Seen twice; with the two writes
-  300 ms apart the same bytes logged in.
+  `sudo launchctl kickstart -k system/com.apple.screensharing`.
 
-On a LAN two writes sent back to back usually arrive together, so a viewer must pause (250 ms is
-enough) between the type byte and message 1. Screen Sharing.app asks for the password in between, so
-a Mac never sees the two together from it. Types 30 and 2 are not affected: the Mac speaks first
-after them.
+Two writes sent apart arrive together often enough to matter: back to back on a LAN; after any
+pause, when the client is too busy to send the first in time (the Mac log then shows the 31 bytes
+arriving 0.5–3 s after it offered its logins, against 5–40 ms normally); after a lost segment, which
+TCP holds the later one behind; and through an SSH tunnel, whose server may pass both on in one
+write. Screen Sharing.app asks for the password between the two, so a Mac rarely sees them together
+from it. Types 30 and 2 are not affected: the Mac speaks first after them.
 
 An SRP login costs about 0.9 s from connect to "preparing displays" in optimised code (PBKDF2 with
 156,250 rounds and three 4096-bit exponentiations).
@@ -787,7 +792,7 @@ wayshare shares a Hyprland desktop on Linux with Screen Sharing.app. Run from so
 | | wayshare | A Mac |
 |---|---|---|
 | Security types | `[36]` (`[36, 30]` in a development mode) | `[30, 33, 36, 35]` |
-| SRP message 1 | **No second type byte**; Screen Sharing.app sends it that way to wayshare | The type byte again; without it a Mac closes the connection |
+| SRP message 1 | **No second type byte**; Screen Sharing.app sends it that way to wayshare | The type byte again when read apart from the login type; without it a Mac then closes the connection (see [SRP login](#srp-login-type-36)) |
 | Names in message 1 | Takes I, or U if I is empty; Screen Sharing.app sends U empty | Needs both |
 | Group | RFC 5054's **2048-bit** group, g = 2, numbers padded to 256 bytes | 4096-bit, g = 5 |
 | Iterations, salt | 20,000 by default, 16-byte salt | 156,250, 32-byte salt |

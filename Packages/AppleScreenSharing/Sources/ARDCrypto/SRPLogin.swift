@@ -114,9 +114,8 @@ public enum SRPLogin {
 
     // MARK: Messages
 
-    /// Message 1. A Mac reads the type byte a second time in front of it and closes the connection
-    /// without it; wayshare, and Screen Sharing.app when it logs in to wayshare, have it only once,
-    /// as the choice of type, so `repeatsType` is for Macs only.
+    /// Message 1, after the login type. With `repeatsType`, the type byte is in front of it: sent in
+    /// one write, the two are the choice of type followed by message 1, which every server reads.
     public static func firstMessage(username: String, repeatsType: Bool = true) throws(LoginError) -> Data {
         guard username.utf8.count <= 255 else { throw .credentialTooLong }
         var fields = WireWriter()

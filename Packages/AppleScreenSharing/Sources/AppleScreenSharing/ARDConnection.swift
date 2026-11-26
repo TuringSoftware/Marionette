@@ -40,12 +40,6 @@ public actor ARDConnection {
         /// Debug builds only: receives the session's secret keys as text lines, so that a capture of
         /// this client's own traffic can be decrypted. Ignored in release builds.
         public var keyLog: (@Sendable (String) -> Void)?
-        /// How long the chosen login type stands alone before SRP's first message follows. A Mac's
-        /// screensharingd must read the type byte by itself: on macOS 15.6, finding the type byte and
-        /// message 1 in one read, it takes four bytes too many, then loops on "SRP invalid step" at
-        /// several cores and refuses every later login until the daemon restarts (macOS 27 recovers).
-        /// Screen Sharing.app asks for the password in between, so a Mac never sees them together.
-        public var pauseAfterLoginType: Duration = .milliseconds(250)
         /// The versions ViewerInfo gives. For protocol experiments.
         public var viewerVersions = ClientMessage.viewerVersions
 
@@ -172,16 +166,14 @@ public actor ARDConnection {
         guard chosen == .srp || !configuration.requiresSRP else {
             throw .unsupported("the server offers no login that proves its identity (offered \(offered))")
         }
-        outbound.send(Data([chosen.rawValue]))
-        if chosen == .srp {
-            // SRP is the one login where the viewer speaks next; the others wait for the Mac.
-            try? await Task.sleep(for: configuration.pauseAfterLoginType)
-        }
+        // SRP's first message begins with the type byte and goes with it in one write (see
+        // ``logInWithSRP``); the other logins wait for the Mac after the type.
+        if chosen != .srp { outbound.send(Data([chosen.rawValue])) }
 
         let wrapKey: Data?
         switch chosen {
         case .srp:
-            wrapKey = try await logInWithSRP(username: username, password: password, repeatsType: Self.isMac(offering: offered))
+            wrapKey = try await logInWithSRP(username: username, password: password)
         case .vncPassword:
             try await logInWithVNCPassword(password)
             wrapKey = nil
@@ -299,11 +291,17 @@ public actor ARDConnection {
         )
     }
 
-    /// Security type 36. Returns the key the rekey is wrapped under, once the Mac has proved it
-    /// holds the account's verifier.
-    private func logInWithSRP(username: String, password: String, repeatsType: Bool) async throws(ARDError) -> Data {
+    /// Security type 36, from the choice of type on. Returns the key the rekey is wrapped under,
+    /// once the Mac has proved it holds the account's verifier.
+    ///
+    /// The type byte and message 1 go in one write, which arrives in one piece. screensharingd
+    /// parses message 1 according to what it read with the type byte: with nothing, it expects the
+    /// type again in front of the message; with the message behind it, it expects the length at
+    /// once. Sent apart, the two could still arrive together (a busy client, a lost segment, a
+    /// tunnel), and macOS 15.6 then loops on "SRP invalid step" until the daemon is restarted.
+    private func logInWithSRP(username: String, password: String) async throws(ARDError) -> Data {
         do {
-            outbound.send(try SRPLogin.firstMessage(username: username, repeatsType: repeatsType))
+            outbound.send(try SRPLogin.firstMessage(username: username))
         } catch {
             throw .credentialTooLong
         }

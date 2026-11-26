@@ -68,9 +68,10 @@ the code.
 ### macOS 15
 
 The Screen Sharing daemon of macOS 15.6 can hang for good: it logs "SRP invalid step" in a loop and
-uses a full core, and no viewer can log in. Marionette avoids the cause (the login type and the first
-SRP message arriving in one read), but an experimental client can trigger it. Restart the service at
-the Mac:
+uses a full core, and no viewer can log in. A viewer that sends the SRP login type and message 1
+apart, and has them arrive together, causes it (see the protocol reference's SRP login); Marionette
+sends them in one write, but an experimental client can still trigger it. Restart the service at the
+Mac:
 
 ```
 sudo launchctl kickstart -k system/com.apple.screensharing

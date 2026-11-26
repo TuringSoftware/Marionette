@@ -48,6 +48,8 @@ actor PipeHalf {
 
     var availableCount: Int { buffer.count }
 
+    var firstAvailableByte: UInt8? { buffer.first }
+
     func takeAvailable() -> Data {
         defer { buffer.removeAll() }
         return buffer
@@ -96,6 +98,11 @@ final class PipeStream: ByteStream {
 
     func availableCount() async -> Int {
         await incoming.availableCount
+    }
+
+    /// The next byte to be read, if it has arrived, without reading it.
+    func peekFirstByte() async -> UInt8? {
+        await incoming.firstAvailableByte
     }
 
     func close() async {
@@ -173,10 +180,9 @@ final class ScriptedMac: Sendable {
         /// A real Mac also offers 36 (SRP). Left out by default: SRP's 4096-bit arithmetic takes
         /// seconds in an unoptimised build, and most tests are about what comes after the login.
         var securityTypes: [UInt8] = [30, 33, 35]
-        /// SRP only: a Mac's screensharingd that is slow to read the login type (one that has just
-        /// started, say) and cannot cope with SRP's first message already behind it: if the message
-        /// arrives within 50 ms of the type byte, the login goes no further.
-        var needsTheLoginTypeAlone = false
+        /// SRP only: screensharingd on macOS 15.6, which never recovers from misreading message 1:
+        /// the login goes no further and the Mac records it (``Record/misreadFirstMessage``).
+        var loopsOnAMisreadFirstMessage = false
         /// A Mac whose ServerInit had "set encryption" (0x12) taken out of its message list on the
         /// way, by something between it and the viewer.
         var stripsSetEncryption = false
@@ -298,8 +304,9 @@ final class ScriptedMac: Sendable {
     struct Record: Sendable {
         var logins: [(username: String, password: String)] = []
         var srpLogins: [(username: String, proofAccepted: Bool)] = []
-        /// SRP's first message came with the login type (``Options/needsTheLoginTypeAlone``).
-        var loginTypeArrivedWithMessage = false
+        /// SRP's first message was misread: it came with the login type yet began with the type
+        /// again (``Options/loopsOnAMisreadFirstMessage``).
+        var misreadFirstMessage = false
         /// The session-select answers, with the name and password of a request to log in.
         var sessionSelectAnswers: [SessionSelectAnswer] = []
         var sessionLogins: [(username: String, password: String)] = []
@@ -736,21 +743,18 @@ final class ScriptedMac: Sendable {
         }
         try await stream.write(Data([UInt8(options.securityTypes.count)] + options.securityTypes))
         let chosen = try await stream.readExactly(1)[0]
-        if chosen == 36, options.needsTheLoginTypeAlone {
-            try await Task.sleep(for: .milliseconds(50))
-            if await stream.availableCount() > 0 {
-                record.withLock { $0.loginTypeArrivedWithMessage = true }
-                await stream.close()
-                return
-            }
-        }
+        // Like screensharingd, a message read with the type byte is taken to start with its length;
+        // one read later starts with the type again. What arrives within 50 ms counts as read with
+        // it, as for a daemon slow to read.
+        if chosen == 36 { try await Task.sleep(for: .milliseconds(50)) }
+        let readWithType = await stream.availableCount() > 0
         let wrapKey: Data?
         switch chosen {
         case 2:
             guard try await serveVNCPassword() else { return }
             wrapKey = nil
         case 36:
-            guard let key = try await serveSRP() else { return }
+            guard let key = try await serveSRP(readWithType: readWithType) else { return }
             wrapKey = key
         case 30:
             guard let key = try await serveDiffieHellman() else { return }
@@ -774,7 +778,7 @@ final class ScriptedMac: Sendable {
     }
 
     /// Type 36 as screensharingd serves it. Returns the rekey's wrapping key, or nil after a refusal.
-    private func serveSRP() async throws -> Data? {
+    private func serveSRP(readWithType: Bool) async throws -> Data? {
         func readMessage(lead: Bool) async throws -> WireReader {
             if lead, !options.isWayshare {
                 guard try await stream.readExactly(1) == Data([36]) else { throw Failure.unexpected("SRP message without its type") }
@@ -800,7 +804,12 @@ final class ScriptedMac: Sendable {
         let g = group.generator
         func pad(_ value: BigUInt) -> Data { group.pad(value) }
 
-        var first = try await readMessage(lead: true)
+        if readWithType, !options.isWayshare, options.loopsOnAMisreadFirstMessage, await stream.peekFirstByte() == 36 {
+            record.withLock { $0.misreadFirstMessage = true }
+            await stream.close()
+            return nil
+        }
+        var first = try await readMessage(lead: !readWithType)
         let authenticationID = try utf8(&first)
         _ = try utf8(&first)
         let salt = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) })

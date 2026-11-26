@@ -57,11 +57,14 @@ A Mac serves one viewer in High Performance, and every simulator shares this Mac
 - Tell the person about side effects you could not avoid, such as their clipboard being replaced.
 - A Mac you want asleep must be left alone: any connection, SSH included, wakes it.
 
-## After contact with an older Mac
+## A Mac on macOS 15
 
-Run `Scripts/with-test-host.sh [--profile NAME] .agents/skills/live-testing/scripts/mac-health.sh`
-after anything experimental has talked to a Mac on macOS 15. If it shows the hang described in
-test-machines.md, stop and ask the person to restart the service.
+Its Screen Sharing daemon can hang for good (test-machines.md). While a run that logs in to such a
+Mac is under way, start
+`Scripts/with-test-host.sh [--profile NAME] .agents/skills/live-testing/scripts/watch-mac.sh <pid of the run>`
+in the background beside it: it stops the run as soon as the daemon hangs. Then tell the person at
+once, with the command that restarts the service, rather than wait for the run. After anything
+experimental has talked to such a Mac, check it with `scripts/mac-health.sh` the same way.
 
 ## When a live test fails
 
