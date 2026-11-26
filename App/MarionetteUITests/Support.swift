@@ -41,6 +41,14 @@ extension XCUIApplication {
         buttons["view-menu"].waitToExist().tap()
     }
 
+    /// Shows the other display in a window of its own, from the View menu (iPad).
+    func openDisplayWindow() {
+        openViewMenu()
+        // Items of a submenu lose their accessibility identifiers (iOS 27.0 simulators, both iPad
+        // Pro sizes), so this one is found by its title, as the options of the menu's pickers are.
+        buttons["Show Other Display in New Window"].waitToExist().tap()
+    }
+
     /// Opens the control strip if it is folded into its handle. The handle fades when the screen
     /// has not been touched for a while; a touch brings it back.
     func showControls() {
@@ -78,14 +86,19 @@ extension XCUIApplication {
     }
 
     /// Dismisses iOS's "Save Password?" offer, if it appears after a sign-in form. It covers the app
-    /// and takes every touch until answered; whether it appears depends on the device's AutoFill
-    /// state (the iPhone Duo simulator shows it, iPhone 17's does not).
+    /// and takes every touch until answered; whether it appears depends on the simulator's AutoFill
+    /// state. It is in the app's hierarchy, or on older systems SpringBoard's.
     func answerSavePasswordPrompt() {
-        let notNow = buttons["Not Now"]
-        guard notNow.waitForExistence(timeout: 3) else { return }
-        notNow.tap()
-        // The sheet keeps taking touches until it has gone.
-        _ = notNow.waitForNonExistence(timeout: 5)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let candidates = [buttons["Not Now"], springboard.buttons["Not Now"]]
+        guard let notNow = candidates.first(where: { $0.waitForExistence(timeout: 3) }) else { return }
+        // The button exists while the sheet is still sliding in, and a tap then is lost (seen on the
+        // iPhone 17 simulator, iOS 27): tap until the sheet has gone.
+        for _ in 0..<4 where notNow.exists {
+            notNow.tap()
+            if notNow.waitForNonExistence(timeout: 3) { break }
+        }
+        // The sheet keeps taking touches until its dismissal has finished.
         Thread.sleep(forTimeInterval: 0.8)
     }
 

@@ -160,7 +160,7 @@ final class LiveConnectionTests: XCTestCase {
         secret.tap()
         secret.typeText(password)
         app.buttons["Add"].tap()
-        dismissSavePassword(app)
+        app.answerSavePasswordPrompt()
         card.waitToExist().tap()
         // Plain VNC encrypts nothing, and says so.
         _ = waitConnected(app, expecting: "Standard · VNC · Not Secure")
@@ -674,22 +674,10 @@ final class LiveConnectionTests: XCTestCase {
         secret.typeText(host.password)
         configure(app)
         app.buttons["Add"].tap()
-        // On a device iOS offers to save the password it just saw typed; the sheet takes the next tap.
-        dismissSavePassword(app)
+        // iOS may offer to save the password it just saw typed; the sheet takes the next tap.
+        app.answerSavePasswordPrompt()
         card.waitToExist()
         return app
-    }
-
-    /// Closes iOS's "Save Password?" sheet if it comes up (devices only; the simulator does not
-    /// offer it). It may belong to the app or to the system.
-    @MainActor
-    private func dismissSavePassword(_ app: XCUIApplication) {
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        for candidate in [app.buttons["Not Now"], springboard.buttons["Not Now"]] where candidate.waitForExistence(timeout: 4) {
-            print("LIVE dismissed the Save Password sheet")
-            candidate.tap()
-            return
-        }
     }
 
     @MainActor

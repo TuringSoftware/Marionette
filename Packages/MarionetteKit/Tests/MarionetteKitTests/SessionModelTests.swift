@@ -288,15 +288,14 @@ import Testing
     }
 
     @Test func aDroppedConnectionReconnectsAndKeepsTheLastFrame() async throws {
-        var dropping = fastScenario()
-        // Long enough windows to be seen on a loaded machine: connected for 0.6 s, then 0.3 s
-        // before the first reconnection attempt.
-        dropping.disconnect = (.milliseconds(600), .connectionLost(detail: ""))
-        var fixture = try Fixture([dropping, fastScenario()])
-        fixture.reconnection.initialDelay = .milliseconds(300)
-        fixture.reconnection.maximumDelay = .milliseconds(300)
+        var fixture = try Fixture([fastScenario(), fastScenario()])
+        // Long enough to be seen on a loaded machine before the first reconnection attempt.
+        fixture.reconnection.initialDelay = .seconds(2)
+        fixture.reconnection.maximumDelay = .seconds(2)
         let model = try await fixture.connectedModel()
         try await waitUntil { model.hasFirstFrame }
+        // Dropped once the first frame is in, not on a timer that a loaded machine can let fire first.
+        fixture.backend.sessions[0].simulateDisconnect(.connectionLost(detail: ""))
         try await waitUntil { if case .reconnecting = model.phase { true } else { false } }
         #expect(model.renderer.hasFrame)
         try await waitUntil { model.phase == .connected }

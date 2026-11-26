@@ -285,7 +285,9 @@ private func request(
 
     @Test func rapidResizesApplyOnlyTheLast() async throws {
         var scenario = fastScenario()
-        scenario.reconfigurationDelay = .milliseconds(40)
+        // Every request must come while the first is still being applied; 5 ms sleeps can take
+        // tens of milliseconds on a loaded machine.
+        scenario.reconfigurationDelay = .seconds(1)
         let session = try await connect(scenario)
         let configuration = try #require(session.capabilities.displayConfiguration.value)
         let generationBefore = session.layout.generation

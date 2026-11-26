@@ -169,6 +169,8 @@ private struct RootView<Content: View>: View {
 private struct SessionWindow: View {
     let environment: AppEnvironment
     let window: SessionWindowID?
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
         if let window, environment.sessions.session(id: window.sessionID) != nil {
@@ -176,7 +178,25 @@ private struct SessionWindow: View {
             DisplayWindowContent(controller: .shared)
         } else {
             ContentUnavailableView("Session Ended", systemImage: "display", description: Text("This session is no longer open."))
+                .task { if environment.options.isUITestMode { giveWayToTheLibrary() } }
         }
+    }
+
+    /// Each UI test starts from a first launch, but the system restores a display window an earlier
+    /// test opened, in front, with the library's window hidden behind it.
+    private func giveWayToTheLibrary() {
+        let application = UIApplication.shared
+        // Not one on screen: this window's own scene may still be on its way to active.
+        let behind = application.openSessions.first { session in
+            guard let state = session.scene?.activationState else { return true }
+            return state == .background || state == .unattached
+        }
+        if let library = behind {
+            application.activateSceneSession(for: UISceneSessionActivationRequest(session: library))
+        } else {
+            openWindow(id: "library")
+        }
+        dismissWindow()
     }
 }
 

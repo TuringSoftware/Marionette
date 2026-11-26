@@ -82,10 +82,12 @@ import Testing
     // MARK: Background
 
     @Test func aDropInTheBackgroundWaitsForTheForegroundAndIsThenRedialledAtOnce() async throws {
-        var fixture = try Fixture([dropping(), fastScenario()])
+        var fixture = try Fixture([fastScenario(), fastScenario()])
         fixture.reconnection = Self.slow
         let model = try await fixture.connectedModel()
         toBackground(model)
+        // Dropped once in the background, not on a timer that a loaded machine can let fire first.
+        fixture.backend.sessions[0].simulateDisconnect(.connectionLost(detail: ""))
         try await waitUntil { model.phase == .reconnecting(attempt: 1) }
         try await Task.sleep(for: .milliseconds(100))
         #expect(fixture.backend.attempts == 1, "nothing dials in the background")

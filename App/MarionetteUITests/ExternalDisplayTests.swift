@@ -47,8 +47,7 @@ final class ExternalDisplayTests: XCTestCase {
         let app = XCUIApplication.marionette(autoConnect: true, extra: ["-MarionetteScenario", "two-displays"])
         app.remoteDisplay.waitToExist()
         XCTAssertTrue(app.waitForRemoteDisplay(containing: "High Performance"))
-        app.openViewMenu()
-        app.buttons["open-display-window"].waitToExist().tap()
+        app.openDisplayWindow()
         app.element("display-window").waitToExist(20)
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = "display-window"

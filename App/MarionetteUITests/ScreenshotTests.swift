@@ -534,8 +534,7 @@ final class ScreenshotTests: XCTestCase {
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "windows of their own are an iPad feature")
         capture("49-ipad-display-window", scenario: "two-displays", autoConnect: true, settle: 2) { app in
             waitForSession(app)
-            app.openViewMenu()
-            app.buttons["open-display-window"].waitToExist().tap()
+            app.openDisplayWindow()
             app.element("display-window").waitToExist(20)
         }
     }
