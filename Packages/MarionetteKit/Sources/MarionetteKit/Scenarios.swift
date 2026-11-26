@@ -47,6 +47,8 @@ public struct ScenarioSetup: Sendable {
         case empty
         /// A handful of computers with thumbnails.
         case populated
+        /// Three Macs, all used lately: the library as the App Store's pictures show it.
+        case showcase
     }
 
     /// Scenario per connection attempt; the last repeats.
@@ -83,7 +85,7 @@ public enum ScenarioCatalog {
         "hp", "standard", "ssh", "vnc", "two-displays", "tone", "empty", "slow", "credentials", "bad-password",
         "host-key", "host-key-changed", "session-select", "keyboard-interactive", "unreachable", "hp-unavailable",
         "fallback", "unreliable-network", "fit-to-device", "busy", "tunnel-failed", "local-network-denied", "drop",
-        "remote-closed", "files-send-only", "file-drag", "remote-drag",
+        "remote-closed", "files-send-only", "file-drag", "remote-drag", "showcase",
     ]
 
     /// A screen-sized desktop that fills quickly and animates gently.
@@ -130,6 +132,12 @@ public enum ScenarioCatalog {
             var setup = ScenarioSetup(scenario)
             setup.seed = .empty
             setup.discovered = []
+            return setup
+        case "showcase":
+            var setup = ScenarioSetup(scenario)
+            setup.seed = .showcase
+            // One of the saved Macs, which marks it as on the network, and two that are not saved.
+            setup.discovered = Array(SimulatedDiscoveryProvider.sampleComputers.prefix(3))
             return setup
         case "first-launch":
             var setup = ScenarioSetup(scenario)

@@ -1,0 +1,45 @@
+<!doctype html>
+<!--
+    Copyright © 2026 Turing Software, LLC
+    SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marionette search result</title>
+<link rel="stylesheet" href="style.css">
+<style>
+    /* Search results: 3:2, up to 3840 × 2560. One unit is 1/3840 of the width. */
+    .canvas {
+        --u: calc(100vw / 3840);
+        background:
+            radial-gradient(64% 56% at 50% 44%, rgba(255, 160, 112, 0.55) 0%, rgba(255, 160, 112, 0) 66%),
+            linear-gradient(170deg, var(--brand-light) 0%, var(--brand) 32%, var(--brand-deep) 72%, var(--brand-night) 100%);
+    }
+    .phrase { position: absolute; left: 0; right: 0; top: calc(var(--u) * 1606); text-align: center; font-size: calc(var(--u) * 166); font-weight: 600; letter-spacing: -0.015em; line-height: 1; white-space: nowrap; z-index: 2; }
+</style>
+</head>
+<body>
+<div class="canvas" id="canvas"><div class="phrase" id="phrase"></div></div>
+<script src="lib.js"></script>
+<script>
+    // search.html?phrase=…&right=duo&guides=1
+    // Apple's art safe area is 2168 × 1030 at (836, 765): the iPhone in the middle and the phrase
+    // fill it. The devices lower down in the wings are atmosphere. The right wing holds a second
+    // iPhone, or with right=duo an iPhone Duo.
+    const options = Store.parameters({ phrase: "Your Mac, in your hands.", right: "iphone" });
+    const full = { width: 3840, height: 2560 };
+    const canvas = document.getElementById("canvas");
+    document.getElementById("phrase").textContent = options.phrase;
+    // Built while the page loads, so that the pictures hold back the load event and with it Chrome's capture.
+    Store.hang(canvas, full, { device: "ipad", landscape: true, shot: Store.capture("ipad", "session-landscape-toolbar"), x: 450, y: 1850, width: 860, rotate: -4, aux: true, strings: [0.14, 0.86], stringWidth: 16 });
+    if (options.right === "duo") {
+        Store.hang(canvas, full, { device: "duo", landscape: true, shot: Store.capture("duo", "session-landscape-toolbar"), x: 3400, y: 1850, width: 820, rotate: 5, aux: true, strings: [0.16, 0.84], stringWidth: 16 });
+    } else {
+        Store.hang(canvas, full, { device: "iphone", landscape: false, shot: Store.capture("iphone", "session-keyboard-chevron"), x: 3330, y: 1770, width: 480, rotate: 5, aux: true, strings: [0.16, 0.84], stringWidth: 16 });
+    }
+    Store.hang(canvas, full, { device: "iphone", landscape: true, shot: Store.capture("iphone", "session-landscape-chevron"), x: 1920, y: 1158, width: 1620, stringWidth: 16 });
+    if (options.guides) Store.drawGuide(canvas, { x: 836, y: 765, width: 2168, height: 1030 }, full);
+</script>
+</body>
+</html>

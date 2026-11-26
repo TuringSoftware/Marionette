@@ -53,6 +53,9 @@ Scripts/external-display.sh <simulator udid> <label>   # attaches a monitor to t
 
 Screenshots are written to `Artifacts/screenshots/<device>/`.
 
+The pictures for the App Store are made differently, from real sessions:
+[App Store assets](app-store-assets.md).
+
 The live tests, the manual set-up and the pasteboard measurement in the same test target skip
 themselves unless their environment variables are set.
 
@@ -132,7 +135,7 @@ booted, ready to use.
 
 | Argument | Effect |
 |---|---|
-| `-MarionetteScenario <name>` | Uses the simulated back end in the named scenario (`hp`, `standard`, `vnc`, `ssh`, `bad-password`, `host-key-changed`, `session-select`, `unreliable-network`, … ; see `ScenarioCatalog` in `Packages/MarionetteKit`). |
+| `-MarionetteScenario <name>` | Uses the simulated back end in the named scenario (`hp`, `standard`, `vnc`, `ssh`, `bad-password`, `host-key-changed`, `session-select`, `unreliable-network`, `showcase`, … ; see `ScenarioCatalog` in `Packages/MarionetteKit`). |
 | `-MarionetteUITestMode` | A seeded library, a fixed clock and no animations. |
 | `-MarionetteAutoConnect` | Opens the scenario's computer at launch. |
 | `-MarionetteFoldOverride docked\|book` | Lays a session out as on a partly open iPhone Duo. |
@@ -140,6 +143,7 @@ booted, ready to use.
 | `-MarionetteClipboardMode explicit\|automatic\|off` | Overrides the clipboard setting. |
 | `-MarionetteExternalMode mirror\|externalOnly\|dual` | Overrides the external display mode. |
 | `-MarionetteWindowed` | Behaves as in a window smaller than the screen. |
+| `-MarionetteThumbnails <folder>` | A JPEG in the folder named after a seeded computer (`Studio Mac.jpg`) is its thumbnail in the library. |
 | `-MarionetteDiagnostics` | Puts what UI tests read (zoom, display size, input received) in the remote display's accessibility value, also against a real computer. Implied by `-MarionetteUITestMode`. |
 
 ## Live tests

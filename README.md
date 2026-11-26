@@ -57,6 +57,8 @@ On the Mac you connect to, turn on **Screen Sharing** (System Settings › Gener
 - [Testing](Docs/testing.md): unit, UI, screenshot and live tests, `marionettectl`, continuous
   integration and releases.
 - [Test machines](Docs/test-machines.md): setting up the Macs and VNC servers the live tests use.
+- [App Store assets](Docs/app-store-assets.md): making the screenshots, promo images, product page
+  header and search result image.
 - [Apple Screen Sharing protocol](Docs/protocol/apple-screen-sharing.md): what the app relies on, and
   how each part was verified.
 - [Coding guide](Docs/coding-guide.md)

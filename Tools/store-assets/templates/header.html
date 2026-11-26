@@ -1,0 +1,43 @@
+<!doctype html>
+<!--
+    Copyright © 2026 Turing Software, LLC
+    SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marionette product page header</title>
+<link rel="stylesheet" href="style.css">
+<style>
+    /* Product page header: 21:9, 3840 × 1646. One unit is 1/3840 of the width. */
+    .canvas {
+        --u: calc(100vw / 3840);
+        background:
+            radial-gradient(52% 110% at 50% 52%, rgba(255, 160, 112, 0.55) 0%, rgba(255, 160, 112, 0) 64%),
+            linear-gradient(100deg, var(--brand-night) 0%, var(--brand-deep) 22%, var(--brand) 50%, var(--brand-deep) 78%, var(--brand-night) 100%);
+    }
+</style>
+</head>
+<body>
+<div class="canvas" id="canvas"></div>
+<script src="lib.js"></script>
+<script>
+    // header.html?right=duo&guides=1
+    // Apple's art safe area is 1646 × 661 at (1097, 493): the iPhone in the middle stays inside it.
+    // The devices in the wings are atmosphere, and may be cut off on a narrow screen. The right
+    // wing holds a second iPhone, or with right=duo an iPhone Duo.
+    const options = Store.parameters({ right: "iphone" });
+    const full = { width: 3840, height: 1646 };
+    const canvas = document.getElementById("canvas");
+    // Built while the page loads, so that the pictures hold back the load event and with it Chrome's capture.
+    Store.hang(canvas, full, { device: "ipad", landscape: true, shot: Store.capture("ipad", "session-landscape-toolbar"), x: 650, y: 900, width: 1010, rotate: 4, aux: true, strings: [0.12, 0.88] });
+    if (options.right === "duo") {
+        Store.hang(canvas, full, { device: "duo", landscape: true, shot: Store.capture("duo", "session-landscape-toolbar"), x: 3300, y: 900, width: 900, rotate: -5, aux: true, strings: [0.16, 0.84] });
+    } else {
+        Store.hang(canvas, full, { device: "iphone", landscape: false, shot: Store.capture("iphone", "session-keyboard-chevron"), x: 3120, y: 900, width: 500, rotate: -5, aux: true, strings: [0.16, 0.84] });
+    }
+    Store.hang(canvas, full, { device: "iphone", landscape: true, shot: Store.capture("iphone", "session-landscape-chevron"), x: 1920, y: 836, width: 1280, rotate: -3 });
+    if (options.guides) Store.drawGuide(canvas, { x: 1097, y: 493, width: 1646, height: 661 }, full);
+</script>
+</body>
+</html>

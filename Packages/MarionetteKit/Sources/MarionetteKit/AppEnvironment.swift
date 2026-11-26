@@ -37,6 +37,10 @@ public struct LaunchOptions: Sendable, Hashable {
     /// `-MarionetteWindowed`: behave as in a window smaller than the screen (UI tests; nothing can
     /// resize the simulator's window from the command line).
     public var isWindowedOverride = false
+    /// `-MarionetteThumbnails <folder>`: a JPEG there named after a seeded computer
+    /// ("Studio Mac.jpg") is that computer's thumbnail in the library, in place of the simulated
+    /// desktop (pictures of the library for the App Store).
+    public var thumbnailFolder: URL?
     /// `-MarionetteDiagnostics`: the remote display's accessibility value carries what tests read
     /// (zoom, display size, input received), also against a real computer. Implied by UI-test mode.
     public var reportsDiagnostics: Bool { isUITestMode || wantsDiagnostics }
@@ -61,6 +65,7 @@ public struct LaunchOptions: Sendable, Hashable {
             case "-MarionetteClipboardMode": clipboardMode = iterator.next().flatMap(ClipboardMode.init(rawValue:))
             case "-MarionetteExternalMode": externalDisplayMode = iterator.next().flatMap(ExternalDisplayMode.init(rawValue:))
             case "-MarionetteWindowed": isWindowedOverride = true
+            case "-MarionetteThumbnails": thumbnailFolder = iterator.next().map { URL(fileURLWithPath: $0, isDirectory: true) }
             case "-MarionetteDiagnostics": wantsDiagnostics = true
             default: break
             }
@@ -223,7 +228,7 @@ public final class AppEnvironment {
         let keys = SSHKeyStore(secrets: secrets, hardware: SimulatedHardwareKeys())
         let clock: any AppClock = options.isUITestMode ? FixedClock() : SystemClock()
         let repository = ComputerRepository(container: try! ComputerRepository.makeContainer(inMemory: true))
-        await SeedData.seed(setup, into: repository, secrets: secrets, clock: clock)
+        await SeedData.seed(setup, into: repository, secrets: secrets, clock: clock, thumbnails: options.thumbnailFolder)
         return AppEnvironment(
             options: options,
             registry: registry,

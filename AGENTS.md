@@ -14,6 +14,7 @@ the Xcode project is generated from `project.yml`.
 | Running the tests, the app and `marionettectl` | [Docs/testing.md](Docs/testing.md) |
 | The machines live tests connect to | [Docs/test-machines.md](Docs/test-machines.md) |
 | Apple's protocol, and how each fact is known | [Docs/protocol/apple-screen-sharing.md](Docs/protocol/apple-screen-sharing.md) |
+| Making the App Store's screenshots and other pictures | [Docs/app-store-assets.md](Docs/app-store-assets.md) |
 | What a change needs before it is submitted | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ## Skills
@@ -27,6 +28,8 @@ you start.
 - `protocol-research`: finding out what a Mac does, and turning it into code and documentation.
 - `ui-review`: any change to a screen, control, gesture or user-visible text.
 - `release`: setting the version, and uploading the CI build of it to App Store Connect.
+- `app-store-assets`: capturing and rendering the App Store's screenshots, promo images and
+  creative assets.
 
 Settings that belong to one person's set-up (profiles, the device, API keys, the test-host profile)
 are in the git-ignored `.env`; skills read and save them with `Scripts/env.sh`, which prints no

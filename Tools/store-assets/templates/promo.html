@@ -1,0 +1,62 @@
+<!doctype html>
+<!--
+    Copyright © 2026 Turing Software, LLC
+    SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marionette promo</title>
+<link rel="stylesheet" href="style.css">
+<style>
+    /* One unit is 1/886 of the width, so the layout is the same picture at every size. */
+    .canvas { --u: calc(100vw / 886); display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: calc(var(--u) * 104) 0 calc(var(--u) * 112); }
+    .features { list-style: none; text-align: center; font-size: calc(var(--u) * 40); font-weight: 600; line-height: 1; letter-spacing: -0.005em; white-space: nowrap; }
+    .features li { padding: calc(var(--u) * 23) 0; }
+    .features li + li { border-top: calc(var(--u) * 1.5) solid rgba(255, 255, 255, 0.22); }
+    .features { width: calc(var(--u) * 790); }
+    .device { width: calc(var(--u) * 818); }
+
+    /* A squarer page (an iPad, an open iPhone Duo) has less height to spend, so everything
+       tightens. A media query and not a class set by script: the window is not at its final
+       height while the page loads. */
+    @media (min-aspect-ratio: 3/5) {
+        .canvas { --u: calc(100vw / 1200); padding: calc(var(--u) * 64) 0 calc(var(--u) * 70); }
+        .features { font-size: calc(var(--u) * 37); width: calc(var(--u) * 820); }
+        .features li { padding: calc(var(--u) * 15) 0; }
+        .device { width: calc(var(--u) * 900); }
+        .lockup svg { width: calc(var(--u) * 88); height: calc(var(--u) * 88); }
+        .lockup span { font-size: calc(var(--u) * 54); }
+    }
+</style>
+</head>
+<body>
+<div class="canvas" id="canvas">
+    <div class="lockup" id="lockup"></div>
+    <ul class="features" id="above"></ul>
+    <div class="device shadowed" id="device"></div>
+    <ul class="features" id="below"></ul>
+</div>
+<script src="lib.js"></script>
+<script>
+    // promo.html?device=iphone|ipad|duo
+    // The feature list around a landscape session with the strip folded to its handle.
+    const options = Store.parameters({ device: "iphone" });
+    const features = [
+        "High Performance (HEVC) Screen Sharing",
+        "VNC with Adaptive Quality",
+        "SSH Tunnel",
+        "Shared Clipboard",
+        "Drag & Drop Files",
+        "HDR",
+        "External Display",
+        "Dynamic Resolution",
+    ];
+    const fill = (id, items) => { document.getElementById(id).innerHTML = items.map(text => `<li>${text.replace("&", "&amp;")}</li>`).join(""); };
+    fill("above", features.slice(0, 4));
+    fill("below", features.slice(4));
+    document.getElementById("lockup").innerHTML = Store.iconSVG() + "<span>Marionette</span>";
+    document.getElementById("device").innerHTML = Store.frameSVG(options.device, { landscape: true, href: Store.capture(options.device, "session-landscape-chevron") });
+</script>
+</body>
+</html>

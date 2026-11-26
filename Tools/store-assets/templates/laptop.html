@@ -1,0 +1,36 @@
+<!doctype html>
+<!--
+    Copyright © 2026 Turing Software, LLC
+    SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marionette laptop pose</title>
+<link rel="stylesheet" href="style.css">
+<style>
+    /* The second iPhone Duo promo: one phrase and the half-open device. Same field, lockup and type
+       as promo.html; one unit is 1/886 of the width. */
+    .canvas { --u: calc(100vw / 886); display: flex; flex-direction: column; align-items: center; padding: calc(var(--u) * 104) 0 calc(var(--u) * 112); }
+    .phrase { margin-top: calc(var(--u) * 150); text-align: center; font-size: calc(var(--u) * 92); font-weight: 600; line-height: 1.08; letter-spacing: -0.02em; }
+    .pose { margin-top: auto; margin-bottom: auto; width: calc(var(--u) * 800); }
+    .pose img { display: block; width: 100%; height: auto; filter: drop-shadow(0 calc(var(--u) * 30) calc(var(--u) * 40) rgba(40, 0, 12, 0.5)); }
+</style>
+</head>
+<body>
+<div class="canvas" id="canvas">
+    <div class="lockup" id="lockup"></div>
+    <div class="phrase" id="phrase"></div>
+    <div class="pose"><img id="pose" alt=""></div>
+</div>
+<script src="lib.js"></script>
+<script>
+    // laptop.html?phrase=…    ("|" breaks the line)
+    // captures/duo/laptop-pose.png is the half-open device cut out of DeviceHub's window.
+    const options = Store.parameters({ phrase: "Use your phone as|a tiny laptop" });
+    document.getElementById("lockup").innerHTML = Store.iconSVG() + "<span>Marionette</span>";
+    document.getElementById("phrase").innerHTML = options.phrase.split("|").map(line => line.replace("&", "&amp;")).join("<br>");
+    document.getElementById("pose").src = Store.capture("duo", "laptop-pose");
+</script>
+</body>
+</html>

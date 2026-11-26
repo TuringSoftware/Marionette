@@ -1,0 +1,21 @@
+<!doctype html>
+<!--
+    Copyright © 2026 Turing Software, LLC
+    SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marionette vector references</title>
+</head>
+<body>
+<script src="lib.js"></script>
+<script>
+    // frame.html?device=iphone|ipad|duo&landscape=1   an empty device frame; the screen is #screen
+    // frame.html?icon=1                               the app icon, flat
+    // Scripts/store-assets.sh reads the SVG out of this page to write the vector references.
+    const options = Store.parameters({ device: "iphone" });
+    document.body.innerHTML = options.icon ? Store.iconSVG() : Store.frameSVG(options.device, { landscape: options.landscape === "1" });
+</script>
+</body>
+</html>

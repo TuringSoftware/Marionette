@@ -1,0 +1,58 @@
+<!doctype html>
+<!--
+    Copyright © 2026 Turing Software, LLC
+    SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marionette App Store assets</title>
+<style>
+    /* Every finished asset on one sheet, for looking them over together. */
+    body { margin: 0; padding: 48px 56px; background: #f2f2f4; color: #1c1c1e; font-family: "Avenir Next", sans-serif; }
+    h1 { font-size: 44px; font-weight: 600; margin: 0 0 8px; }
+    h2 { font-size: 28px; font-weight: 600; margin: 44px 0 16px; }
+    .row { display: flex; gap: 28px; align-items: flex-end; flex-wrap: wrap; }
+    figure { margin: 0; }
+    figure img { display: block; height: var(--height); width: auto; border-radius: 10px; box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18); background: #fff; }
+    figcaption { margin-top: 10px; font-size: 19px; color: #5b5b60; }
+</style>
+</head>
+<body>
+<h1>Marionette: App Store assets</h1>
+<div id="sheet"></div>
+<script>
+    const assets = "../../../Artifacts/app-store";
+    // Title, picture height on the sheet in points, then each picture with its caption.
+    const groups = [
+        ["iPhone 6.3-inch", 560, [
+            ["screenshots/iphone/01-library.png", "01 library"],
+            ["screenshots/iphone/02-session-toolbar.png", "02 session, toolbar"],
+            ["screenshots/iphone/03-session-keyboard.png", "03 session, keyboard"],
+            ["previews/iphone/features-886x1920.png", "features"],
+        ]],
+        ["iPad 13-inch", 520, [
+            ["screenshots/ipad/01-library.png", "01 library"],
+            ["screenshots/ipad/02-session-toolbar.png", "02 session, toolbar"],
+            ["screenshots/ipad/03-session-keyboard.png", "03 session, keyboard"],
+            ["previews/ipad/features-1200x1600.png", "features"],
+        ]],
+        ["iPhone Duo, inner display", 470, [
+            ["screenshots/duo/01-library.png", "01 library"],
+            ["screenshots/duo/02-session-toolbar.png", "02 session, toolbar"],
+            ["screenshots/duo/03-session-keyboard.png", "03 session, keyboard"],
+            ["screenshots/duo/04-laptop-pose.png", "04 half open"],
+            ["previews/duo/features-886x1920.png", "features"],
+            ["previews/duo/tiny-laptop-886x1920.png", "tiny laptop"],
+        ]],
+        ["Product page header", 440, [["creative/product-page-header-3840x1646.png", "3840 × 1646"], ["proofs/product-page-header-safe-area.png", "with Apple's art safe area"]]],
+        ["Search results", 620, [["creative/search-results-3840x2560.png", "3840 × 2560"], ["proofs/search-results-safe-area.png", "with Apple's art safe area"]]],
+    ];
+    // A picture that has not been made yet leaves no gap.
+    document.getElementById("sheet").innerHTML = groups.map(([title, height, items]) =>
+        `<h2>${title}</h2><div class="row" style="--height:${height}px">` +
+        items.map(([path, caption]) => `<figure><img src="${assets}/${path}" alt="" onerror="this.parentNode.remove()"><figcaption>${caption}</figcaption></figure>`).join("") +
+        `</div>`).join("");
+</script>
+</body>
+</html>

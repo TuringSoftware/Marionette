@@ -335,6 +335,7 @@ import Testing
         #expect(options.isUITestMode)
         #expect(options.foldOverride == .docked)
         #expect(LaunchOptions(arguments: ["Marionette", "-MarionetteFoldOverride", "sideways"]).foldOverride == nil)
+        #expect(LaunchOptions(arguments: ["Marionette", "-MarionetteThumbnails", "/tmp/pictures"]).thumbnailFolder?.path == "/tmp/pictures")
         #expect(LaunchOptions(arguments: ["Marionette"]) == LaunchOptions())
     }
 
@@ -351,6 +352,26 @@ import Testing
         session.disconnect()
         #expect(environment.sessions.sessions.isEmpty)
         #expect(environment.sessions.presented == nil)
+    }
+
+    /// A picture named after a seeded computer replaces the simulated desktop on its card; the
+    /// other computers keep theirs.
+    @Test func theShowcaseLibraryTakesItsThumbnailsFromAFolder() async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "thumbnails-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let picture = Data("a picture of a desktop".utf8)
+        try picture.write(to: folder.appending(path: "MacBook Pro.jpg"))
+
+        let environment = await AppEnvironment.make(
+            arguments: ["Marionette", "-MarionetteUITestMode", "-MarionetteScenario", "showcase", "-MarionetteThumbnails", folder.path],
+            pasteboard: InMemoryPasteboard()
+        )
+        let items = environment.library.items
+        #expect(items.map(\.configuration.displayName) == ["Studio Mac", "MacBook Pro", "Mac mini"])
+        #expect(items.allSatisfy { $0.record.lastConnected != nil })
+        #expect(items[1].record.thumbnail == picture)
+        #expect(items[0].record.thumbnail != nil && items[0].record.thumbnail != picture)
     }
 
     @Test func theEmptyScenarioHasNoComputers() async {
