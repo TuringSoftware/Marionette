@@ -18,7 +18,11 @@ public final class SessionStore {
     /// Called when a session closes, so the library can refresh thumbnails and dates.
     @ObservationIgnored public var onSessionClosed: (() -> Void)?
 
-    public init(dependencies: @escaping () -> SessionModel.Dependencies) {
+    /// Told of every session that connects, and of its end.
+    @ObservationIgnored private let support: SupportPrompts?
+
+    public init(support: SupportPrompts? = nil, dependencies: @escaping () -> SessionModel.Dependencies) {
+        self.support = support
         makeDependencies = dependencies
     }
 
@@ -39,6 +43,7 @@ public final class SessionStore {
             return existing
         }
         let session = SessionModel(computer: computer, dependencies: makeDependencies())
+        session.onFirstConnection = { [weak self] in self?.support?.sessionConnected() }
         session.onClose = { [weak self] closed in self?.didClose(closed) }
         sessions.append(session)
         presented = session
@@ -75,6 +80,7 @@ public final class SessionStore {
         sessions.removeAll { $0.id == session.id }
         if presented?.id == session.id { presented = nil }
         if session.wantsEditor, !session.computer.isDemo { editRequest = session.computer.id }
+        if session.hasConnected { support?.sessionEnded() }
         onSessionClosed?()
     }
 }

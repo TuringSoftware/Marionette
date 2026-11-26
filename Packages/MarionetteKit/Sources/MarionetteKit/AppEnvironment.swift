@@ -41,9 +41,17 @@ public struct LaunchOptions: Sendable, Hashable {
     /// ("Studio Mac.jpg") is that computer's thumbnail in the library, in place of the simulated
     /// desktop (pictures of the library for the App Store).
     public var thumbnailFolder: URL?
+    /// `-MarionetteSessionCount <n>`: starts as after `n` sessions with no prompt answered, for the
+    /// prompts that wait for the app to have been used. On a real device this replaces what the app
+    /// had counted and been told.
+    public var sessionCount: Int?
     /// `-MarionetteDiagnostics`: the remote display's accessibility value carries what tests read
     /// (zoom, display size, input received), also against a real computer. Implied by UI-test mode.
     public var reportsDiagnostics: Bool { isUITestMode || wantsDiagnostics }
+    /// Whether the app may ask for a review or a donation. Not where `-MarionetteDiagnostics` was
+    /// asked for: that is a test against a real computer, in an app that has counted its earlier
+    /// runs, and a prompt would come up over what the test is looking at.
+    public var allowsSupportPrompts: Bool { !wantsDiagnostics }
     private var wantsDiagnostics = false
 
     public enum Appearance: String, Sendable, Hashable {
@@ -66,6 +74,7 @@ public struct LaunchOptions: Sendable, Hashable {
             case "-MarionetteExternalMode": externalDisplayMode = iterator.next().flatMap(ExternalDisplayMode.init(rawValue:))
             case "-MarionetteWindowed": isWindowedOverride = true
             case "-MarionetteThumbnails": thumbnailFolder = iterator.next().map { URL(fileURLWithPath: $0, isDirectory: true) }
+            case "-MarionetteSessionCount": sessionCount = iterator.next().flatMap { Int($0) }
             case "-MarionetteDiagnostics": wantsDiagnostics = true
             default: break
             }
@@ -93,6 +102,8 @@ public final class AppEnvironment {
     public let repository: ComputerRepository
     public let sessions: SessionStore
     public let library: LibraryModel
+    /// When to ask for a review and for a donation.
+    public let support: SupportPrompts
 
     /// `hostKeys` and `sshKeys` default to the ones `transports` connects with, and where it has no
     /// SSH, to stores that last as long as the process.
@@ -126,7 +137,10 @@ public final class AppEnvironment {
         self.library = library
         let ladder = ConnectionLadder(registry: registry, transports: transports)
         let isUITestMode = options.isUITestMode
-        sessions = SessionStore {
+        let support = SupportPrompts(defaults: defaults, clock: clock, isEnabled: options.allowsSupportPrompts)
+        if let count = options.sessionCount { support.setSessionCount(count) }
+        self.support = support
+        sessions = SessionStore(support: support) {
             var dependencies = SessionModel.Dependencies(
                 ladder: ladder, secrets: secrets, pasteboard: pasteboard, clock: clock, repository: repository, defaults: defaults
             )

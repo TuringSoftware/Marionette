@@ -11,7 +11,7 @@ Each layer depends only on the ones below it.
 | Layer | Where | What it holds |
 |---|---|---|
 | App | `App/Marionette` | SwiftUI views and UIKit bridges. No logic of its own. |
-| Models | `Packages/MarionetteKit` | Observable models (`LibraryModel`, `SessionModel`, `ComputerEditorModel`), saved computers, prompts, the connection ladder, the simulated scenarios, and platform services behind protocols. |
+| Models | `Packages/MarionetteKit` | Observable models (`LibraryModel`, `SessionModel`, `ComputerEditorModel`), saved computers, prompts, the connection ladder, when to ask for a review and a donation (`SupportPrompts`), the simulated scenarios, and platform services behind protocols. |
 | Interaction | `Packages/RemoteDesktopInteraction` | Pure Swift: viewport, gesture and pointer interpreters, modifier latching, key translation, the shortcut catalogue. |
 | Rendering | `Packages/RemoteDesktopMedia` | Product `RemoteDesktopRender`: the Metal renderer and audio output every back end shares. |
 | Contract | `Packages/RemoteDesktopCore` | `RemoteDesktopBackend`, `RemoteSession`, capabilities and the value types that cross the boundary. Also `RemoteDesktopSimulated` (the back end behind UI tests and the built-in demo) and `RemoteDesktopConformance` (the suite every back end passes). |

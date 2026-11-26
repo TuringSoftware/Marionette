@@ -34,6 +34,7 @@ final class Bootstrap {
     private(set) var environment: AppEnvironment?
     private var isStarted = false
     private var lifecycle: SessionLifecycle?
+    private var donations: Task<Void, Never>?
 
     func start() async {
         guard !isStarted else { return }
@@ -48,6 +49,7 @@ final class Bootstrap {
         try? Tips.configure([.displayFrequency(.immediate)])
         ExternalDisplayController.shared.preferredModeOverride = environment.options.externalDisplayMode
         lifecycle = SessionLifecycle(sessions: environment.sessions)
+        donations = Donations.watch { environment.support.setDonated($0) }
         self.environment = environment
         if environment.options.autoConnect {
             environment.sessions.open(environment.autoConnectComputer)

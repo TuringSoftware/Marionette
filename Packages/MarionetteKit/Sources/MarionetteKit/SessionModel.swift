@@ -88,6 +88,8 @@ public final class SessionModel: Identifiable {
     public private(set) var hasFirstFrame = false
     /// Set when the user picks "Edit Computer" from a failure; the library opens the editor.
     public private(set) var wantsEditor = false
+    /// True once the session has been connected, whatever became of the connection since.
+    @ObservationIgnored public private(set) var hasConnected = false
 
     public let uiState: SessionUIState
     public let prompts: PromptBroker
@@ -213,6 +215,8 @@ public final class SessionModel: Identifiable {
     @ObservationIgnored private var deckOverlap = 0.0
     /// Plays haptics for gesture milestones; set by the platform layer.
     @ObservationIgnored public var onFeedback: ((InteractionEffect.Feedback) -> Void)?
+    /// Called once, when the session connects for the first time; not when it reconnects.
+    @ObservationIgnored var onFirstConnection: (() -> Void)?
     /// Called once when the session reaches ``SessionPhase/closed``.
     @ObservationIgnored var onClose: ((SessionModel) -> Void)?
 
@@ -483,6 +487,10 @@ public final class SessionModel: Identifiable {
             Task { await session.suspend() }
         }
         phase = .connected
+        if !hasConnected {
+            hasConnected = true
+            onFirstConnection?()
+        }
         apply(layout: session.layout, restartRenderer: true)
         if let banner = bannerAfterReconnect {
             bannerAfterReconnect = nil

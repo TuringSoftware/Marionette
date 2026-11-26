@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import RemoteDesktopCore
+import StoreKit
 import SwiftUI
 import TipKit
 import UIKit
@@ -16,14 +17,23 @@ struct LibraryView: View {
     @State private var pendingDeletion: LibraryModel.Item?
     @State private var showsSettings = false
     @State private var showsSSHKeys = false
+    @State private var showsSupport = false
     private let addComputerTip = AddComputerTip()
+    private let supportTip = SupportTip()
     @Environment(\.openURL) private var openURL
+    @Environment(\.requestReview) private var requestReview
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var library: LibraryModel { environment.library }
     private var sessions: SessionStore { environment.sessions }
+    private var support: SupportPrompts { environment.support }
+
+    /// The library itself is what the person sees: no session and no sheet is over it.
+    private var isInFront: Bool {
+        sessions.presented == nil && editor == nil && helpTopic == nil && !showsSettings && !showsSSHKeys && !showsSupport
+    }
 
     var body: some View {
         @Bindable var sessions = sessions
@@ -36,8 +46,7 @@ struct LibraryView: View {
                     BarButtonTip(
                         tip: addComputerTip,
                         itemTitle: String(localized: "Add Computer"),
-                        // Only while the library itself is in front: not over a session or a sheet.
-                        isActive: sessions.presented == nil && editor == nil && helpTopic == nil && !showsSettings && !showsSSHKeys
+                        isActive: isInFront
                     )
                 }
         }
@@ -58,6 +67,9 @@ struct LibraryView: View {
         .sheet(isPresented: $showsSSHKeys) {
             SSHKeysView(store: environment.sshKeys, hostKeys: environment.hostKeys, owner: environment.owner)
         }
+        .sheet(isPresented: $showsSupport) {
+            SupportSheet(support: support)
+        }
         .fullScreenCover(item: $sessions.presented) { session in
             SessionScreen(session: session)
                 .environment(\.launchOptions, environment.options)
@@ -75,6 +87,13 @@ struct LibraryView: View {
             if !isEmpty { AddComputerTip.hasHadComputer = true }
         }
         .task { library.startDiscovery() }
+        // Asked for once only, so not before the scene is active: due from an earlier run, it would
+        // otherwise be asked for while the app is still launching.
+        .task(id: support.isReviewDue && isInFront && scenePhase == .active) {
+            guard support.isReviewDue, isInFront, scenePhase == .active else { return }
+            requestReview()
+            support.reviewRequested()
+        }
         // Restarts a search the system stopped while in the background or behind a session.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { library.resumeDiscovery() }
@@ -89,7 +108,8 @@ struct LibraryView: View {
                 lookAgain: { Task { await library.refreshDiscovery() } },
                 showSettings: { BarButtonTipPresenter.dismissShown { showsSettings = true } },
                 showSSHKeys: { BarButtonTipPresenter.dismissShown { showsSSHKeys = true } },
-                showHelp: { BarButtonTipPresenter.dismissShown { helpTopic = .enableScreenSharing } }
+                showHelp: { BarButtonTipPresenter.dismissShown { helpTopic = .enableScreenSharing } },
+                showSupport: showSupport
             ) : nil
         }
     }
@@ -99,6 +119,21 @@ struct LibraryView: View {
     private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if support.isDonationDue {
+                    TipView(supportTip) { action in
+                        switch action.id {
+                        case SupportTip.open: showSupport()
+                        case SupportTip.notNow: support.donationPostponed()
+                        case SupportTip.never: support.donationSettled()
+                        default: break
+                        }
+                    }
+                    .tipViewStyle(ProminentActionTipStyle())
+                    // A card, not a banner, where the library is wide.
+                    .frame(maxWidth: 480)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("support-tip")
+                }
                 if !library.isEmpty {
                     cardGrid {
                         ForEach(library.items) { item in
@@ -224,6 +259,11 @@ struct LibraryView: View {
         ToolbarItem(placement: .secondaryAction) {
             Button("SSH Keys", systemImage: "key") { BarButtonTipPresenter.dismissShown { showsSSHKeys = true } }
         }
+        ToolbarItem(placement: .secondaryAction) {
+            Section {
+                Button("Support Us", systemImage: "heart", action: showSupport)
+            }
+        }
     }
 
     @ViewBuilder
@@ -233,6 +273,12 @@ struct LibraryView: View {
         Button("Duplicate", systemImage: "plus.square.on.square") { library.duplicate(item.id) }
         Divider()
         Button("Delete", systemImage: "trash", role: .destructive) { BarButtonTipPresenter.dismissShown { pendingDeletion = item } }
+    }
+
+    /// Having looked at the sheet answers the tip like "Not Now", wherever the sheet was opened from.
+    private func showSupport() {
+        support.donationPostponed()
+        BarButtonTipPresenter.dismissShown { showsSupport = true }
     }
 
     private func connect(_ configuration: ComputerConfiguration) {

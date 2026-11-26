@@ -105,6 +105,8 @@ schemes:
         MarionetteUITests: [test]
     run:
       config: Debug
+      # The donation, served by Xcode in place of the App Store. The UI tests load the same file.
+      storeKitConfiguration: App/MarionetteUITests/Donations.storekit
     test:
       config: Debug
       targets:

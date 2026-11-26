@@ -1,6 +1,7 @@
 // Copyright © 2026 Turing Software, LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import StoreKitTest
 import UIKit
 import XCTest
 
@@ -381,6 +382,28 @@ final class ScreenshotTests: XCTestCase {
             app.buttons["computer-Studio Mac"].waitToExist()
             if app.buttons["More"].firstMatch.exists { app.buttons["More"].firstMatch.tap() }
             app.buttons["Settings"].waitToExist()
+        }
+    }
+
+    @MainActor
+    func testSupport() async throws {
+        // The donation comes from the App Store, which the test session stands in for. What a test
+        // buys stays in the simulator, and an app that finds the donation made never shows the tip.
+        let store = try SKTestSession(configurationFileNamed: "Donations")
+        store.disableDialogs = true
+        store.clearTransactions()
+        addTeardownBlock { store.clearTransactions() }
+        capture("58-library-support-tip", extra: ["-MarionetteSessionCount", "10"]) { app in
+            app.element("support-tip").waitToExist()
+        }
+        capture("59-support-us") { app in
+            libraryAction(app, "Support Us")
+            app.element("donation").waitToExist()
+        }
+        _ = try await store.buyProduct(identifier: "llc.turing.Marionette.one_time_donation")
+        capture("60-support-us-donated") { app in
+            libraryAction(app, "Support Us")
+            app.element("support-thanks").waitToExist()
         }
     }
 

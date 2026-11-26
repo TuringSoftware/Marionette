@@ -14,6 +14,7 @@ struct LibraryActions {
     var showSettings: () -> Void
     var showSSHKeys: () -> Void
     var showHelp: () -> Void
+    var showSupport: () -> Void
 }
 
 /// What the menu bar acts on. The library says what it offers while it is on screen; the session
@@ -188,6 +189,9 @@ struct MarionetteCommands: Commands {
         }
         CommandGroup(replacing: .help) {
             Button("Setting Up a Mac") { library?.showHelp() }
+                .disabled(library == nil)
+            Divider()
+            Button("Support Us") { library?.showSupport() }
                 .disabled(library == nil)
         }
     }

@@ -62,6 +62,14 @@ themselves unless their environment variables are set.
 `xcodebuild` passes a variable to the tests only when its name starts with `TEST_RUNNER_`, which it
 strips: `TEST_RUNNER_MARIONETTE_TEST_HOST=… xcodebuild test …`. The scripts do this.
 
+### Donations
+
+The Support Us sheet sells one non-consumable, `Donations.productID`; App Store Connect has to offer
+it under the same identifier. In a simulator the App Store is stood in for by
+`App/MarionetteUITests/Donations.storekit`: the scheme's Run action uses it when the app is run from
+Xcode, and the UI tests load it with `SKTestSession`. An app launched with `simctl` has no store, and
+the sheet shows the donation as unavailable.
+
 ### The iPhone Duo simulator
 
 The simulator boots closed, showing its outer display. DeviceHub
@@ -144,7 +152,8 @@ booted, ready to use.
 | `-MarionetteExternalMode mirror\|externalOnly\|dual` | Overrides the external display mode. |
 | `-MarionetteWindowed` | Behaves as in a window smaller than the screen. |
 | `-MarionetteThumbnails <folder>` | A JPEG in the folder named after a seeded computer (`Studio Mac.jpg`) is its thumbnail in the library. |
-| `-MarionetteDiagnostics` | Puts what UI tests read (zoom, display size, input received) in the remote display's accessibility value, also against a real computer. Implied by `-MarionetteUITestMode`. |
+| `-MarionetteSessionCount <n>` | Starts as after `n` sessions, with no prompt answered: the donation tip shows from 10, and the system's review prompt is asked for when the fifth session ends. On a real device it replaces what the app had counted; `0` is a clean start. |
+| `-MarionetteDiagnostics` | Puts what UI tests read (zoom, display size, input received) in the remote display's accessibility value, also against a real computer. Implied by `-MarionetteUITestMode`. Given by itself, it also keeps the prompts for a review and a donation away. |
 
 ## Live tests
 
