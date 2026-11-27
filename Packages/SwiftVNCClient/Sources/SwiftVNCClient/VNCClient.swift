@@ -116,7 +116,9 @@ public struct VNCHandlers: Sendable {
     public var credential: @Sendable (VNCCredentialKind) -> VNCCredential? = { _ in nil }
     /// The desktop changed size. The next update repaints all of it.
     public var resized: @Sendable (_ width: Int, _ height: Int) -> Void = { _, _ in }
-    /// A framebuffer update finished; `changed` lists what it touched. Copy what is needed before returning.
+    /// A framebuffer update finished; `changed` lists what it touched, or all of the desktop when
+    /// the update is the first into a new framebuffer, which starts black. Copy what is needed
+    /// before returning.
     public var updated: @Sendable (_ framebuffer: VNCFramebuffer, _ changed: [VNCRect]) -> Void = { _, _ in }
     public var cursor: @Sendable (VNCCursor) -> Void = { _ in }
     public var bell: @Sendable () -> Void = {}
@@ -195,6 +197,8 @@ public final class VNCClient: @unchecked Sendable {
     private var framebuffer: UnsafeMutableRawBufferPointer?
     private var framebufferSize = (width: 0, height: 0)
     private var changed: [VNCRect] = []
+    /// The framebuffer is a new one, black wherever no update has drawn yet.
+    private var isFramebufferNew = false
     private var quality: VNCQuality
     private var throughput: VNCThroughputEstimate
     /// What the server was last asked for.
@@ -641,6 +645,7 @@ public final class VNCClient: @unchecked Sendable {
         framebuffer = buffer
         framebufferSize = width > 0 && height > 0 ? (width, height) : (0, 0)
         changed.removeAll()
+        isFramebufferNew = true
         return buffer.baseAddress?.assumingMemoryBound(to: UInt8.self)
     }
 
@@ -662,6 +667,10 @@ public final class VNCClient: @unchecked Sendable {
         }
         guard !changed.isEmpty else { return }
         defer { changed.removeAll(keepingCapacity: true) }
+        if isFramebufferNew {
+            isFramebufferNew = false
+            changed = [VNCRect(x: 0, y: 0, width: framebufferSize.width, height: framebufferSize.height)]
+        }
         handlers.updated(
             VNCFramebuffer(pixels: UnsafeRawBufferPointer(framebuffer), width: framebufferSize.width, height: framebufferSize.height),
             changed

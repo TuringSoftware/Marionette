@@ -242,7 +242,8 @@ final class VNCSessionCore: Sendable, InputSink {
         var wasCancelled = false
         var cursorID: UInt64 = 0
         var clipboardChangeCount: UInt64 = 0
-        /// Where pictures are made: reused buffers, a few at most (see ``SnapshotBuffers``).
+        /// Where pictures are made: reused buffers, a few at most, each brought up to date with
+        /// what the server changed since it was last used (see ``SnapshotBuffers``).
         var snapshotBuffers = SnapshotBuffers()
         /// What changed in pictures that could not be published (every buffer was still in use);
         /// published with the next one.
@@ -360,6 +361,7 @@ final class VNCSessionCore: Sendable, InputSink {
                 frameInDesktop: PixelRect(x: 0, y: 0, width: width, height: height), scale: 1
             )
             shared.layout = DesktopLayout(generation: shared.layout.generation + 1, displays: [display])
+            shared.snapshotBuffers.removeAll()
             return shared.layout
         }
         events.send(.layoutChanged(layout))
@@ -367,15 +369,20 @@ final class VNCSessionCore: Sendable, InputSink {
 
     private func updated(_ framebuffer: VNCFramebuffer, _ changed: [VNCRect]) {
         let changedRects = changed.map { PixelRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }
-        let (hub, generation, suspended, buffer, pending) = shared.withLock { shared in
+        let whole = PixelRect(x: 0, y: 0, width: framebuffer.width, height: framebuffer.height)
+        let (hub, generation, suspended, snapshot, pending) = shared.withLock { shared in
             if !shared.isSuspended, !framebuffer.isRepublished { shared.awaitsPictureAfterResume = false }
-            let buffer = shared.isSuspended ? nil : shared.snapshotBuffers.buffer(width: framebuffer.width, height: framebuffer.height)
+            // A picture handed over again is the one the buffers were last brought up to date with.
+            if !framebuffer.isRepublished {
+                for rect in changedRects { shared.snapshotBuffers.noteChange(in: rect) }
+            }
+            let snapshot = shared.isSuspended ? nil : shared.snapshotBuffers.buffer(for: whole)
             let pending = shared.pendingDamage + changedRects
-            shared.pendingDamage = buffer == nil && !shared.isSuspended ? pending : []
-            return (shared.hub, shared.layout.generation, shared.isSuspended, buffer, pending)
+            shared.pendingDamage = snapshot == nil && !shared.isSuspended ? pending : []
+            return (shared.hub, shared.layout.generation, shared.isSuspended, snapshot, pending)
         }
         guard !suspended else { return }
-        guard let buffer, let surface = Self.fill(buffer, from: framebuffer) else {
+        guard let snapshot, let surface = Self.fill(snapshot, from: framebuffer) else {
             // Every buffer is still in use. A still screen would send nothing more to carry this
             // picture, so the client hands it over again shortly. The client has it already;
             // asking the server would also freeze the colour depth (see `requestFullUpdate`).
@@ -392,28 +399,28 @@ final class VNCSessionCore: Sendable, InputSink {
             }
             return
         }
-        let size = PixelSize(width: framebuffer.width, height: framebuffer.height)
-        let damage = DamageRegion(pending).clipped(to: PixelRect(size: size))
-        hub.publish(DisplayFrame(display: Self.displayID, surface: surface, pixelSize: size, damage: damage, layoutGeneration: generation))
+        let damage = DamageRegion(pending).clipped(to: whole)
+        hub.publish(DisplayFrame(display: Self.displayID, surface: surface, pixelSize: whole.size, damage: damage, layoutGeneration: generation))
         ready.resolve(.success(()))
     }
 
-    /// Copies the client's framebuffer into `buffer`, which then becomes immutable.
-    private static func fill(_ buffer: CVPixelBuffer, from framebuffer: VNCFramebuffer) -> CVReadOnlyPixelBuffer? {
-        guard let source = framebuffer.pixels.baseAddress else { return nil }
-        CVPixelBufferLockBaseAddress(buffer, [])
-        if let destination = CVPixelBufferGetBaseAddress(buffer) {
-            let destinationStride = CVPixelBufferGetBytesPerRow(buffer)
-            if destinationStride == framebuffer.bytesPerRow {
-                destination.copyMemory(from: source, byteCount: framebuffer.bytesPerRow * framebuffer.height)
-            } else {
-                for row in 0..<framebuffer.height {
-                    (destination + row * destinationStride).copyMemory(from: source + row * framebuffer.bytesPerRow, byteCount: framebuffer.bytesPerRow)
-                }
+    /// Copies the stale part of the client's framebuffer into the snapshot's buffer, which holds
+    /// the rest already and then becomes immutable. `nil` if the buffer could not be written.
+    private static func fill(_ snapshot: SnapshotBuffers.Snapshot, from framebuffer: VNCFramebuffer) -> CVReadOnlyPixelBuffer? {
+        guard let source = framebuffer.pixels.baseAddress,
+              CVPixelBufferLockBaseAddress(snapshot.buffer, []) == kCVReturnSuccess
+        else { return nil }
+        defer { CVPixelBufferUnlockBaseAddress(snapshot.buffer, []) }
+        guard let destination = CVPixelBufferGetBaseAddress(snapshot.buffer) else { return nil }
+        let destinationStride = CVPixelBufferGetBytesPerRow(snapshot.buffer)
+        for part in snapshot.stale.rectangles {
+            for row in part.y..<part.maxY {
+                (destination + row * destinationStride + part.x * 4).copyMemory(
+                    from: source + row * framebuffer.bytesPerRow + part.x * 4, byteCount: part.width * 4
+                )
             }
         }
-        CVPixelBufferUnlockBaseAddress(buffer, [])
-        return .adopting(buffer)
+        return snapshot.finish()
     }
 
     // MARK: Input

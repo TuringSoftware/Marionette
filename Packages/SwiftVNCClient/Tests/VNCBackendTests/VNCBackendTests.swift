@@ -155,6 +155,39 @@ private func until(_ what: String, timeout: Duration = .seconds(5), _ condition:
         await session.disconnect()
     }
 
+    /// A picture made in a buffer used before is given only what changed since that buffer's last
+    /// use: more pictures than there are buffers, each changing a few pixels somewhere else.
+    @Test(.timeLimit(.minutes(1))) func smallChangesShowInPicturesMadeInReusedBuffers() async throws {
+        let transport = ScriptedTransport()
+        let session = try await connect(transport)
+        let display = try #require(session.layout.displays.first)
+        let frames = session.frames(for: display.id)
+        func colours(of frame: DisplayFrame) -> [[UInt8]] {
+            frame.surface.withUnsafeBuffer { buffer in
+                CVPixelBufferLockBaseAddress(buffer, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+                let base = CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to: UInt8.self)
+                let stride = CVPixelBufferGetBytesPerRow(buffer)
+                return (0..<48).flatMap { y in (0..<64).map { x in Array(UnsafeBufferPointer(start: base + y * stride + x * 4, count: 3)) } }
+            }
+        }
+        var expected = (0..<48).flatMap { y in (0..<64).map { x in Array(ScriptedServer.pixel(x: x, y: y).prefix(3)) } }
+        var frame = try #require(await frames.next())
+        #expect(colours(of: frame) == expected)
+        for generation in 1...8 {
+            let (x, y) = (generation * 6, generation * 4)
+            try await transport.latest.paint(x: x, y: y, width: 5, height: 3, generation: generation)
+            for row in y..<y + 3 {
+                for column in x..<x + 5 {
+                    expected[row * 64 + column] = Array(ScriptedServer.pixel(x: column, y: row, generation: generation).prefix(3))
+                }
+            }
+            repeat { frame = try #require(await frames.next()) } while colours(of: frame)[y * 64 + x] != expected[y * 64 + x]
+            #expect(colours(of: frame) == expected, "after change \(generation)")
+        }
+        await session.disconnect()
+    }
+
     @Test func highPerformanceIsRefusedBeforeConnecting() async {
         let transport = ScriptedTransport()
         await #expect(throws: ConnectionFailure.modeUnavailable(mode: .highPerformance, reason: .notSupportedByBackend)) {

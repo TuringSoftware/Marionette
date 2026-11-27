@@ -1863,4 +1863,34 @@ private func expected(width: Int, height: Int, generation: (Int, Int) -> Int = {
         held.removeFirst()
         #expect(framebuffer.snapshot(of: left) != nil, "a buffer let go is used again")
     }
+
+    /// A buffer used again is given only what changed since its last use, and two displays of one
+    /// size share their buffers.
+    @Test func snapshotsInReusedBuffersShowThePictureAsItIs() throws {
+        let framebuffer = Framebuffer(size: PixelSize(width: 64, height: 32))
+        let displays = [PixelRect(x: 0, y: 0, width: 32, height: 32), PixelRect(x: 32, y: 0, width: 32, height: 32)]
+        var held: [CVReadOnlyPixelBuffer] = []
+        for step in 0..<24 {
+            let changed = PixelRect(x: step * 7 % 56, y: step * 5 % 28, width: 8, height: 4)
+            try framebuffer.write(Data(repeating: UInt8(step + 1), count: changed.area * 4), to: changed)
+            let display = displays[step % 3 == 0 ? 1 : 0]
+            let snapshot = try #require(framebuffer.snapshot(of: display))
+            let shown: [UInt8] = snapshot.withUnsafeBuffer { buffer in
+                CVPixelBufferLockBaseAddress(buffer, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+                let base = CVPixelBufferGetBaseAddress(buffer)!
+                let stride = CVPixelBufferGetBytesPerRow(buffer)
+                return (0..<display.height).flatMap { row in
+                    UnsafeRawBufferPointer(start: base + row * stride, count: display.width * 4)
+                }
+            }
+            let picture = framebuffer.copyPixels()
+            let expected = (display.y..<display.maxY).flatMap { row in
+                picture[(row * 64 + display.x) * 4..<(row * 64 + display.maxX) * 4]
+            }
+            #expect(shown == expected, "step \(step)")
+            held.append(snapshot)
+            if held.count > 2 { held.removeFirst() }
+        }
+    }
 }

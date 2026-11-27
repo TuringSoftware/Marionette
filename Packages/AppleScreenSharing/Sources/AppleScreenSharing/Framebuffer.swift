@@ -19,7 +19,8 @@ public final class Framebuffer {
     /// The tile decoder keeps a record per 8 × 8 tile, about 40 % of the pixels' own size; it is
     /// sized for the picture only once Adaptive quality is used.
     private var isAdaptiveSized = false
-    /// Where snapshots are made: reused buffers, no more than ``snapshotsInFlight`` of a size at once.
+    /// Where snapshots are made: reused buffers, no more than ``snapshotsInFlight`` of a size at
+    /// once. Told of every change to the pixels, so that a snapshot copies only what its buffer lacks.
     private var snapshotBuffers = SnapshotBuffers()
 
     /// How many snapshots of one size may exist at once. With that many still in use a snapshot is
@@ -80,6 +81,7 @@ public final class Framebuffer {
                 destination.copyMemory(from: source.baseAddress! + row * rowBytes, byteCount: rowBytes)
             }
         }
+        snapshotBuffers.noteChange(in: rect)
     }
 
     /// Applies the next chunk of the session's zlib stream to `rect`.
@@ -113,6 +115,8 @@ public final class Framebuffer {
         let pixels = UnsafeMutableBufferPointer(
             start: storage.baseAddress!.assumingMemoryBound(to: UInt32.self), count: size.width * size.height
         )
+        // A rectangle that fails has drawn up to where it failed.
+        defer { snapshotBuffers.noteChange(in: rect.intersection(PixelRect(size: size))) }
         do {
             return try adaptive.decode([UInt8](body), x: rect.x, y: rect.y, width: rect.width, height: rect.height, onto: pixels)
         } catch {
@@ -126,23 +130,25 @@ public final class Framebuffer {
     }
 
     /// An immutable copy of one region, as a buffer of that region's size. `nil` when
-    /// ``snapshotsInFlight`` copies of that size are still in use (or memory ran out).
+    /// ``snapshotsInFlight`` copies of that size are still in use (or memory ran out, or the
+    /// buffer could not be written).
     public func snapshot(of region: PixelRect) -> CVReadOnlyPixelBuffer? {
         let region = region.intersection(PixelRect(size: size))
-        guard !region.isEmpty, let buffer = snapshotBuffers.buffer(width: region.width, height: region.height) else { return nil }
-        CVPixelBufferLockBaseAddress(buffer, [])
-        if let destination = CVPixelBufferGetBaseAddress(buffer) {
-            let sourceStride = size.width * 4
-            let destinationStride = CVPixelBufferGetBytesPerRow(buffer)
-            let rowBytes = region.width * 4
-            for row in 0..<region.height {
-                (destination + row * destinationStride).copyMemory(
-                    from: storage.baseAddress! + (region.y + row) * sourceStride + region.x * 4, byteCount: rowBytes
+        guard !region.isEmpty, let snapshot = snapshotBuffers.buffer(for: region),
+              CVPixelBufferLockBaseAddress(snapshot.buffer, []) == kCVReturnSuccess
+        else { return nil }
+        defer { CVPixelBufferUnlockBaseAddress(snapshot.buffer, []) }
+        guard let destination = CVPixelBufferGetBaseAddress(snapshot.buffer) else { return nil }
+        let sourceStride = size.width * 4
+        let destinationStride = CVPixelBufferGetBytesPerRow(snapshot.buffer)
+        for part in snapshot.stale.rectangles {
+            for row in part.y..<part.maxY {
+                (destination + (row - region.y) * destinationStride + (part.x - region.x) * 4).copyMemory(
+                    from: storage.baseAddress! + row * sourceStride + part.x * 4, byteCount: part.width * 4
                 )
             }
         }
-        CVPixelBufferUnlockBaseAddress(buffer, [])
-        return .adopting(buffer)
+        return snapshot.finish()
     }
 
     /// The current pixels, tightly packed B, G, R, X.
