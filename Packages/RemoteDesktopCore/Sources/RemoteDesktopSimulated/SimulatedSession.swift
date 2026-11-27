@@ -57,6 +57,9 @@ public final class SimulatedSession: RemoteSession {
     /// Remote actions performed through the ``RemoteActions`` capability, in order.
     public var performedActions: [RemoteAction] { core.shared.withLock { $0.performedActions } }
 
+    /// Every set of virtual displays asked for through ``DisplayConfiguration``, in order.
+    public var requestedDisplays: [[VirtualDisplayRequest]] { core.shared.withLock { $0.requestedDisplays } }
+
     public var remoteClipboard: [ClipboardItem] { core.shared.withLock { $0.remoteClipboard } }
 
     /// Makes the simulated machine copy text, as if its user pressed Command-C.
@@ -146,6 +149,7 @@ final class SimulatedSessionCore: Sendable, InputSink {
         var pendingInput: [InputEvent] = []
         var receivedInput: [InputEvent] = []
         var performedActions: [RemoteAction] = []
+        var requestedDisplays: [[VirtualDisplayRequest]] = []
         var remoteClipboard: [ClipboardItem] = []
         var clipboardChangeCount: UInt64 = 0
         var controlMode: ControlMode = .control

@@ -153,6 +153,55 @@ import Testing
         model.disconnect()
     }
 
+    @Test func turningBackWhileAResizeIsOnItsWayAsksForTheFirstSizeAgain() async throws {
+        var slow = fastScenario()
+        slow.reconfigurationDelay = .milliseconds(1200)
+        var fixture = try Fixture([slow])
+        fixture.computer.display = .fitToDevice
+        let model = fixture.makeModel()
+        model.stageLayoutChanged(size: CGSize(width: 1376, height: 1032), safeArea: .zero, deviceScale: 2)
+        model.start()
+        try await waitUntil { model.phase == .connected && model.selectedDisplay?.kind == .virtual && !model.isDisplayReconfiguring }
+        model.stageLayoutChanged(size: CGSize(width: 1032, height: 1376), safeArea: .zero, deviceScale: 2)
+        try await waitUntil { model.isDisplayReconfiguring }
+        // Turned back before the Mac has made the upright display: the layout still shows the one
+        // lying on its side, which is no longer what is coming.
+        model.stageLayoutChanged(size: CGSize(width: 1376, height: 1032), safeArea: .zero, deviceScale: 2)
+        try await waitUntil { (model.selectedDisplay?.pixelSize.height ?? 0) > (model.selectedDisplay?.pixelSize.width ?? 0) }
+        try await waitUntil { (model.selectedDisplay?.pixelSize.width ?? 0) > (model.selectedDisplay?.pixelSize.height ?? 0) && !model.isDisplayReconfiguring }
+        model.disconnect()
+    }
+
+    @Test func turnsMadeWhileAResizeIsOnItsWayCostOneMoreResize() async throws {
+        var slow = fastScenario()
+        slow.reconfigurationDelay = .seconds(3)
+        var fixture = try Fixture([slow])
+        fixture.computer.display = .fitToDevice
+        let model = fixture.makeModel()
+        let onItsSide = CGSize(width: 1376, height: 1032)
+        let upright = CGSize(width: 1032, height: 1376)
+        model.stageLayoutChanged(size: onItsSide, safeArea: .zero, deviceScale: 2)
+        model.start()
+        try await waitUntil { model.phase == .connected && model.selectedDisplay?.kind == .virtual && !model.isDisplayReconfiguring }
+        let mac = try #require(fixture.backend.sessions.last)
+        let asked = mac.requestedDisplays.count
+        model.stageLayoutChanged(size: upright, safeArea: .zero, deviceScale: 2)
+        try await waitUntil { mac.requestedDisplays.count == asked + 1 }
+        // Each turn is asked for before the next is made, and all before the first is answered.
+        for size in [onItsSide, upright, onItsSide] {
+            model.stageLayoutChanged(size: size, safeArea: .zero, deviceScale: 2)
+            await model.waitUntilPaneIsSizedFor()
+        }
+        #expect(mac.requestedDisplays.count == asked + 1, "the first resize was answered before the turns were made")
+        await model.waitUntilPaneIsSizedFor(answered: true)
+        // The upright display that was on its way, then the one on its side: the two turns between
+        // were never asked of the Mac.
+        let sent = mac.requestedDisplays.dropFirst(asked).compactMap(\.first?.pointSize)
+        #expect(sent.map { $0.width > $0.height } == [false, true])
+        try await waitUntil { (model.selectedDisplay?.pixelSize.width ?? 0) > (model.selectedDisplay?.pixelSize.height ?? 0) && !model.isDisplayReconfiguring }
+        model.disconnect()
+    }
+
     @Test func thePaneChangingWhileInactiveResizesNothingUntilTheAppIsBack() async throws {
         var fixture = try Fixture()
         fixture.computer.display = .fitToDevice

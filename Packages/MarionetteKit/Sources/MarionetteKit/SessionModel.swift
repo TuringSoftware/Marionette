@@ -144,6 +144,9 @@ public final class SessionModel: Identifiable {
     @ObservationIgnored private var sizerTask: Task<Void, Never>?
     /// The latest display request on its way; the next waits for it.
     @ObservationIgnored private var displayRequestTask: Task<Void, Never>?
+    /// The first display of the newest request, until the back end has answered that request.
+    @ObservationIgnored private var displayOnItsWay: VirtualDisplayRequest?
+    @ObservationIgnored private var displayRequestSerial = 0
     /// What the connection's options asked of displays the back end makes by itself.
     @ObservationIgnored private var wantsHDRAtConnect = false
     /// Bumped for every connection attempt so late callbacks from an old one are ignored.
@@ -692,6 +695,7 @@ public final class SessionModel: Identifiable {
         // A request still waiting must not hold up the next session's.
         displayRequestTask?.cancel()
         displayRequestTask = nil
+        displayOnItsWay = nil
         timerTask?.cancel()
         timerTask = nil
         audio.stop()
@@ -1279,14 +1283,22 @@ public final class SessionModel: Identifiable {
     }
 
     /// Asks for these displays, and remembers which of them were asked for in HDR. Requests go out
-    /// in the order they are made: two at once (a monitor unplugged and the window's screen
-    /// changing) must not reach the back end the other way round.
+    /// one at a time, in the order they are made: two at once (a monitor unplugged and the window's
+    /// screen changing) must not reach the back end the other way round.
     private func requestDisplays(_ requests: [VirtualDisplayRequest], from configuration: any DisplayConfiguration) {
         requestedHDR = requests.map(\.wantsHDR)
+        displayRequestSerial += 1
+        let serial = displayRequestSerial
+        displayOnItsWay = requests.first
         let previous = displayRequestTask
         displayRequestTask = Task {
+            // Answered or given up, the layout says what there is; until then it shows the display
+            // this request replaces.
+            defer { if serial == displayRequestSerial { displayOnItsWay = nil } }
             await previous?.value
-            guard !Task.isCancelled else { return }
+            // One overtaken while it waited is not sent: the newest says everything it said, and
+            // each costs the Mac a couple of seconds.
+            guard !Task.isCancelled, serial == displayRequestSerial else { return }
             try? await configuration.setVirtualDisplays(requests)
         }
     }
@@ -1337,6 +1349,13 @@ public final class SessionModel: Identifiable {
     /// Whether a display of the session is showing HDR pictures now.
     public var isShowingHDR: Bool {
         layout.displays.contains(where: \.isHDR)
+    }
+
+    /// Suspends until the pane's newest size has been asked for, or found to need no asking; with
+    /// `answered`, also until every display request made has been answered or dropped. For tests.
+    public func waitUntilPaneIsSizedFor(answered: Bool = false) async {
+        await sizerTask?.value
+        if answered { await displayRequestTask?.value }
     }
 
     private func paneChanged() {
@@ -1505,7 +1524,9 @@ public final class SessionModel: Identifiable {
     private func isCloseEnough(_ request: VirtualDisplayRequest) -> Bool {
         guard let display = selectedDisplay, display.kind == .virtual else { return false }
         let wanted = PixelSize(width: request.pointSize.width * request.scale, height: request.pointSize.height * request.scale)
-        let current = display.pixelSize
+        // Against the display on its way, when one is: the layout still shows the one it replaces,
+        // and a device turned back to that shape would be left with the other.
+        let current = displayOnItsWay.map { PixelSize(width: $0.pointSize.width * $0.scale, height: $0.pointSize.height * $0.scale) } ?? display.pixelSize
         func close(_ a: Int, _ b: Int) -> Bool { abs(a - b) * 100 <= max(a, b) * 8 }
         return close(wanted.width, current.width) && close(wanted.height, current.height)
     }

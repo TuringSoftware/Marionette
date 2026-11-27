@@ -98,6 +98,7 @@ struct SimulatedDisplayConfiguration: DisplayConfiguration {
     }
 
     func setVirtualDisplays(_ requests: [VirtualDisplayRequest]) async throws {
+        core.shared.withLock { $0.requestedDisplays.append(requests) }
         let limits = limits
         guard requests.count <= limits.maximumVirtualDisplays, !requests.isEmpty else {
             throw SimulationError.tooManyDisplays(maximum: limits.maximumVirtualDisplays)
