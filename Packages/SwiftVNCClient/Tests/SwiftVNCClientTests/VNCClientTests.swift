@@ -270,7 +270,10 @@ private final class Observed: Sendable {
         let (client, server, observed, _) = start { ScriptedServer(end: $0, extendedDesktopSizeScreenID: 0) }
         _ = try await client.connect()
         await observed.wait("the first update") { !$0.updates.isEmpty }
-        // The encodings go again, without ExtendedDesktopSize (-308).
+        // The encodings go again, without ExtendedDesktopSize (-308). The client sends them before
+        // it reports the update, but the server may not have read them yet; a resize before it has
+        // would still come as ExtendedDesktopSize.
+        await waitUntil("the encodings again") { server.recorded.withLock { $0.encodingLists.count >= 2 } }
         let lists = server.recorded.withLock { $0.encodingLists }
         #expect(lists.count == 2)
         #expect(lists.first?.contains(-308) == true)
@@ -585,6 +588,7 @@ private final class Observed: Sendable {
         let (client, server, observed, _) = start()
         _ = try await client.connect()
         await observed.wait("the first update") { !$0.updates.isEmpty }
+        await waitUntil("the request after the first update") { server.isRequestOutstanding }
         let requests = server.recorded.withLock { $0.updateRequests }
         client.republish()
         await observed.wait("the desktop again") { $0.updates.count == 2 }

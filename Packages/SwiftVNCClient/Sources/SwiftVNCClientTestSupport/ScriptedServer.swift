@@ -206,6 +206,10 @@ package final class ScriptedServer: Sendable {
         desktop = Mutex(Desktop(width: width, height: height))
     }
 
+    /// The client has asked for an update that the server has not answered yet. A client asks for
+    /// the next update once it has handled one, so this says that it has, as far as the server can tell.
+    package var isRequestOutstanding: Bool { wire.withLock { $0.requestOutstanding } }
+
     package var width: Int { desktop.withLock { $0.width } }
     package var height: Int { desktop.withLock { $0.height } }
 

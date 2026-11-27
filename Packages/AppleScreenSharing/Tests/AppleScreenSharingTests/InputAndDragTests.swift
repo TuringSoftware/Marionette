@@ -168,6 +168,8 @@ private extension RemoteSession {
         try session.point(7, 8, .primary)
         await until("the presses") { mac.sealedInput.count >= 2 }
         await session.disconnect()
+        // The session has sent the releases; the Mac reads them in its own time.
+        await until("the releases") { mac.inputTraffic.count >= 4 }
         let sealed = mac.sealedInput
         #expect(sealed.suffix(2).contains { $0.event == .key(keysym: 0xffe1, isDown: false) })
         #expect(sealed.suffix(2).contains { $0.event == .pointer(mask: 0, x: 7, y: 8) })
@@ -278,7 +280,9 @@ private extension RemoteSession {
         let (drags, display) = try Self.drags(session)
         let drag = try drags.beginDrag(names: ["notes.txt"], at: PixelPoint(x: 10, y: 20), on: display)
         let dropped = Task { try await drag.drop() }
-        await until("the release") { mac.inputTraffic.last == .pointer(mask: 0, x: 10, y: 20) }
+        // The press and the release: the drag's first event, the move it enters with, is the
+        // release's twin.
+        await until("the release") { mac.inputTraffic.suffix(2) == [.pointer(mask: 1, x: 10, y: 20), .pointer(mask: 0, x: 10, y: 20)] }
         guard case .drag(let token, _)? = mac.inputTraffic.dropFirst().first else {
             Issue.record("the Mac saw \(mac.inputTraffic)")
             return
@@ -337,7 +341,7 @@ private extension RemoteSession {
         let (drags, display) = try Self.drags(session)
         let drag = try drags.beginDrag(names: ["notes.txt"], at: PixelPoint(x: 10, y: 20), on: display)
         let dropped = Task { try await drag.drop() }
-        await until("the release") { mac.inputTraffic.last == .pointer(mask: 0, x: 10, y: 20) }
+        await until("the release") { mac.inputTraffic.suffix(2) == [.pointer(mask: 1, x: 10, y: 20), .pointer(mask: 0, x: 10, y: 20)] }
         let ended = ContinuousClock.now
         if macHangsUp {
             await mac.hangUp()

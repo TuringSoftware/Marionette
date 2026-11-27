@@ -32,7 +32,10 @@ Scripts/test.sh
 ```
 
 Runs `swift test` for every package on this Mac; `swift test --package-path Packages/<Name> --filter
-<pattern>` runs one package or one test. Nothing here touches the network: protocol code is
+<pattern>` runs one package or one test. The script runs as many tests at a time as the Mac has
+cores, through `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH`. `swift test` on its own starts all
+of a package's tests at once, and MarionetteKit's then time out on a machine with few cores, such as
+a CI runner. Nothing here touches the network: protocol code is
 tested against recorded fixtures and scripted servers (`ScriptedMac` for Apple's protocol, a scripted
 RFB server for LibVNCClient, an `sshd` on the loopback interface for SSH), and network conditions
 are simulated with a seeded impairment layer. Every back end also has to pass the conformance suite in

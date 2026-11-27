@@ -439,13 +439,39 @@ private final class CoalescingSOCKSProxy: Sendable {
     }
 
     @Test func theGrantedReceiveBufferIsReadBack() throws {
-        let asked = try UDPDatagramChannel.open(host: "127.0.0.1", options: DatagramOptions(remotePort: 9, receiveBufferSize: 8 << 20))
+        let wanted = 8 << 20
+        let asked = try UDPDatagramChannel.open(host: "127.0.0.1", options: DatagramOptions(remotePort: 9, receiveBufferSize: wanted))
         defer { asked.close() }
-        // macOS allows 8 MB; the step-down would settle within an eighth of a limit below it.
-        #expect(asked.receiveBufferSize == 8 << 20)
         let untouched = try UDPDatagramChannel.open(host: "127.0.0.1", options: DatagramOptions(remotePort: 9))
         defer { untouched.close() }
-        #expect(untouched.receiveBufferSize > 0 && untouched.receiveBufferSize < 8 << 20)
+        #expect(untouched.receiveBufferSize > 0 && untouched.receiveBufferSize < wanted)
+        // How much a system grants is bounded by its kern.ipc.maxsockbuf, which differs between
+        // machines: GitHub's macOS runners grant less than 8 MB. Past its limit a system either
+        // refuses (and the channel steps down) or quietly cuts the size to the limit, as macOS 27
+        // does; either way the channel reports what the socket holds.
+        let granted = asked.receiveBufferSize
+        #expect(granted > untouched.receiveBufferSize && granted <= wanted)
+        #expect(Self.receiveBuffer(asking: granted) == granted)
+        if Self.receiveBuffer(asking: wanted) == wanted {
+            #expect(granted == wanted)
+        } else {
+            // Within an eighth of a step of the most the system holds.
+            let more = granted + granted / 7 + 1
+            #expect(Self.receiveBuffer(asking: more).map { $0 < more } ?? true)
+        }
+    }
+
+    /// What a new socket's receive buffer holds after asking for `size`; `nil` if it was refused.
+    private static func receiveBuffer(asking size: Int) -> Int? {
+        let descriptor = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var value = Int32(clamping: size)
+        guard setsockopt(descriptor, SOL_SOCKET, SO_RCVBUF, &value, socklen_t(MemoryLayout<Int32>.size)) == 0 else { return nil }
+        var held: Int32 = 0
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        getsockopt(descriptor, SOL_SOCKET, SO_RCVBUF, &held, &length)
+        return Int(held)
     }
 
     @Test func secondBindToSamePortIsRefused() throws {

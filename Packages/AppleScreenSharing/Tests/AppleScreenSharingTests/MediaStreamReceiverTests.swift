@@ -506,18 +506,19 @@ final class FakeMac {
         mac.send(keyframe)
         mac.send(mac.picture())
         // One request may be lost on the way, so it is repeated: here first 150 ms into the stream
-        // and then every 100 ms. Each request is timed as the viewer sent it, so a busy machine,
-        // which only makes the timer late, cannot make the count look wrong.
+        // and then every 100 ms.
         var requests: [(name: String, at: ContinuousClock.Instant)] = []
         await until("four requests", timeout: .seconds(5)) {
             requests += mac.timedRequests()
             return requests.count >= 4
         }
         #expect(requests.allSatisfy { $0.name == "keyframe request" })
-        #expect(requests.first.map { $0.at - streamBegan >= .milliseconds(150) } == true, "asked before the Mac would listen")
-        // Never more often than the interval (the report timer ticks every 50 ms, a few ms of leeway).
-        for (earlier, later) in zip(requests, requests.dropFirst()) {
-            #expect(later.at - earlier.at >= .milliseconds(90), "repeated after \(later.at - earlier.at)")
+        // Never sooner than that. A request is timed as it is sent, after the receiver decided on
+        // it, and a busy machine can hold one send back until the next is nearly due; but a late
+        // send only comes later, so each request is held against the start of the stream.
+        for (index, request) in requests.enumerated() {
+            let earliest = Duration.milliseconds(150 + 100 * index)
+            #expect(request.at - streamBegan >= earliest, "request \(index + 1) after \(request.at - streamBegan)")
         }
 
         mac.send(mac.picture(keyframe: true))

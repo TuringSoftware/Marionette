@@ -23,6 +23,11 @@ fi
 # OpenSSL is the one dependency SwiftPM cannot build; make sure it is there and current.
 Scripts/build-deps.sh
 
+# Swift Testing otherwise starts every test of a package at once: MarionetteKit's three hundred
+# sessions then take 6 GB and queue on the one main actor, and on a CI runner with few cores tests
+# that wait for a connection time out by the dozen. As many at a time as there are cores runs as fast.
+export SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH="${SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH:-$(sysctl -n hw.activecpu)}"
+
 status=0
 output="$(mktemp)"
 trap 'rm -f "$output"' EXIT

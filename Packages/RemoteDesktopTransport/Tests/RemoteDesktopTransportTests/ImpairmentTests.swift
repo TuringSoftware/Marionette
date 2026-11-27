@@ -186,8 +186,11 @@ private func timed(
         #expect((11...14).contains(arrivals.count))
         #expect(counts.overflowedInbound == 200 - arrivals.count)
         #expect(arrivals.map(\.number) == Array(0..<arrivals.count))
-        let spread = try #require(arrivals.last).at - arrivals[0].at
-        #expect(spread > .milliseconds(80) && spread < .milliseconds(200))
+        // Paced by the link: each one only after all before it and itself have crossed. A datagram
+        // is stamped when it is delivered, which a busy machine makes late but never early.
+        for (index, arrival) in arrivals.enumerated() {
+            #expect(arrival.at >= .microseconds(8_200 * (index + 1)), "datagram \(index) after \(arrival.at)")
+        }
     }
 
     @Test func delayHoldsEveryDatagramAndJitterReordersThem() async throws {
@@ -216,11 +219,18 @@ private func timed(
         for index in 0..<20 { base.arrive(index) }
         #expect(delivered.withLock { $0 } == 20)
 
+        let lossy = NetworkImpairment(inboundLoss: 1)
+        // The second step is far enough off that a busy machine cannot run into it before the
+        // datagrams meant for the first have arrived.
         let steps = control.play([
-            .init(after: .milliseconds(50), impairment: NetworkImpairment(inboundLoss: 1)),
-            .init(after: .milliseconds(150), impairment: NetworkImpairment()),
+            .init(after: .milliseconds(50), impairment: lossy),
+            .init(after: .seconds(1), impairment: NetworkImpairment()),
         ])
-        try await Task.sleep(for: .milliseconds(100))
+        let deadline = ContinuousClock.now + .seconds(5)
+        while control.current != lossy, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try #require(control.current == lossy)
         for index in 20..<40 { base.arrive(index) }
         #expect(delivered.withLock { $0 } == 20)
         await steps.value

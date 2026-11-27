@@ -570,6 +570,9 @@ private func until(_ what: String, timeout: Duration = .seconds(5), _ condition:
         let display = try #require(session.layout.displays.first)
         let frames = session.frames(for: display.id)
         _ = await frames.next()
+        // The client asks for what follows the first picture as it hands it over, and the server
+        // may not have read that request yet.
+        await until("the request after the first picture") { transport.latest.isRequestOutstanding }
         let requests = transport.latest.recorded.withLock { $0.updateRequests }
         await session.suspend()
         await session.resume()
