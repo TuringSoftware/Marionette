@@ -238,11 +238,11 @@ step, including file drags, gestures and raw messages, is listed above `runInput
 
 ## Continuous integration and releases
 
-`.github/workflows/build.yml` runs on every push. One job builds an unsigned archive of the Release
-configuration and keeps it as the run's `Marionette.xcarchive` artifact (a zip) for 30 days; the
-other runs `Scripts/test.sh`. Caches are saved from `main` only: OpenSSL, keyed on its submodule
-commit and the Xcode version, and Xcode's compilation cache for the archive, which is keyed on
-content and so carries over to a fresh checkout.
+`.github/workflows/build.yml` runs on every push to a branch, not on a pushed tag. One job builds
+an unsigned archive of the Release configuration and keeps it as the run's `Marionette.xcarchive`
+artifact (a zip) for 30 days; the other runs `Scripts/test.sh`. Caches are saved from `main` only:
+OpenSSL, keyed on its submodule commit and the Xcode version, and Xcode's compilation cache for the
+archive, which is keyed on content and so carries over to a fresh checkout.
 
 `Scripts/sign-archive.sh` signs such an archive, or the zip of one, with the settings above:
 

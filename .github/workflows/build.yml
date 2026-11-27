@@ -1,13 +1,16 @@
 # Copyright © 2026 Turing Software, LLC
 # SPDX-License-Identifier: Apache-2.0
 #
-# Builds an unsigned archive of the app and runs the packages' tests on every push. The archive is
-# uploaded as the artifact "Marionette.xcarchive" (a zip, which keeps the bundle's symlinks);
-# Scripts/sign-archive.sh signs it for a device or for App Store Connect.
+# Builds an unsigned archive of the app and runs the packages' tests on every push to a branch. A
+# release tag marks a commit that has already been built, so pushing one starts nothing. The
+# archive is uploaded as the artifact "Marionette.xcarchive" (a zip, which keeps the bundle's
+# symlinks); Scripts/sign-archive.sh signs it for a device or for App Store Connect.
 name: Build
 
 on:
+  # A branch filter without a tag filter leaves tag pushes out.
   push:
+    branches: ['**']
   workflow_dispatch:
 
 # A run on main may be the build being released, so each gets a group of its own and is never
