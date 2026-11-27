@@ -584,6 +584,28 @@ private final class Observed: Sendable {
         client.disconnect()
     }
 
+    /// Regression: input sent from another thread as the session ended could write to the wake
+    /// pipe after its reader was closed, and SIGPIPE ended the process.
+    @Test(.timeLimit(.minutes(1))) func inputWhileTheSessionEndsIsDroppedQuietly() async throws {
+        for round in 0..<100 {
+            let (client, server, _, serving) = start()
+            _ = try await client.connect()
+            let stop = Atomic<Bool>(false)
+            let typist = Thread {
+                var x = 0
+                while !stop.load(ordering: .relaxed) {
+                    client.sendPointer(x: x % 60, y: 1, buttonMask: x & 1)
+                    x += 1
+                }
+            }
+            typist.start()
+            if round.isMultiple(of: 2) { client.disconnect() } else { await server.hangUp() }
+            try await Task.sleep(for: .milliseconds(10))
+            stop.store(true, ordering: .relaxed)
+            serving.cancel()
+        }
+    }
+
     @Test func republishingHandsOverTheDesktopWithoutAskingTheServer() async throws {
         let (client, server, observed, _) = start()
         _ = try await client.connect()

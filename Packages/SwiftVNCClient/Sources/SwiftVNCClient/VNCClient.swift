@@ -236,6 +236,10 @@ public final class VNCClient: @unchecked Sendable {
         var one: Int32 = 1
         setsockopt(bridgeSocket, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         let (wakeReader, wakeWriterEnd) = (wake[0], wake[1])
+        // A write after the reader is gone fails rather than raising SIGPIPE, which would end the
+        // process; and one into a full pipe returns at once, as a byte waiting already wakes the loop.
+        _ = fcntl(wakeWriterEnd, F_SETNOSIGPIPE, 1)
+        _ = fcntl(wakeWriterEnd, F_SETFL, fcntl(wakeWriterEnd, F_GETFL) | O_NONBLOCK)
         lock.withLock { wakeWriter = wakeWriterEnd }
         startBridge(bridgeSocket)
 
@@ -404,12 +408,13 @@ public final class VNCClient: @unchecked Sendable {
 
         func closeDescriptors() {
             Darwin.close(librarySocket)
-            Darwin.close(wakeReader)
-            let writer: Int32 = lock.withLock {
-                defer { wakeWriter = -1 }
-                return wakeWriter
+            // The writer first, under the lock commands are written under: once it is closed no
+            // command can write to it, nor to a descriptor that has since taken its number.
+            lock.withLock {
+                if wakeWriter >= 0 { Darwin.close(wakeWriter) }
+                wakeWriter = -1
             }
-            if writer >= 0 { Darwin.close(writer) }
+            Darwin.close(wakeReader)
         }
 
         guard let client = marionette_vnc_create(&callbacks) else {
@@ -680,8 +685,8 @@ public final class VNCClient: @unchecked Sendable {
     // MARK: Commands (any thread)
 
     private func enqueue(_ command: Command) {
-        let writer: Int32 = lock.withLock {
-            guard wakeWriter >= 0 else { return -1 }
+        lock.withLock {
+            guard wakeWriter >= 0 else { return }
             // A move that has not gone out yet is replaced by the next one with the same buttons:
             // only the latest position matters, and a burst of moves must not hold up a click.
             if case .pointer(_, _, let mask) = command, case .pointer(_, _, let queuedMask) = commands.last, mask == queuedMask {
@@ -689,11 +694,10 @@ public final class VNCClient: @unchecked Sendable {
             } else {
                 commands.append(command)
             }
-            return wakeWriter
+            // Under the lock, so that the session ending cannot close the pipe in between.
+            var byte: UInt8 = 1
+            _ = write(wakeWriter, &byte, 1)
         }
-        guard writer >= 0 else { return }
-        var byte: UInt8 = 1
-        _ = write(writer, &byte, 1)
     }
 
     public func sendKey(keysym: UInt32, isDown: Bool) {
