@@ -75,7 +75,7 @@ import Testing
         model.disconnect()
     }
 
-    @Test func aProtectedLoginPasswordNeedsTheOwnerAgainOnceTheAppHasLeftTheScreen() async throws {
+    @Test(.timeLimit(.minutes(1))) func aProtectedLoginPasswordNeedsTheOwnerAgainOnceTheAppHasLeftTheScreen() async throws {
         var fixture = try Fixture(savePassword: false)
         fixture.computer.passwordProtection.requiresUserPresence = true
         try fixture.secrets.setSecret("demo", for: .remoteDesktopPassword(for: fixture.computer), protection: fixture.computer.passwordProtection)
@@ -95,9 +95,12 @@ import Testing
         try await waitUntil { text(sentTo: session) == "demo" }
         #expect(owner.withLock { $0.asked } == 1, "unlocked when signing in")
 
+        // Back once the session has been suspended and resumed: it takes no input in between.
+        var states = session.events().compactMap { if case .stateChanged(let state) = $0 { state } else { nil } }.makeAsyncIterator()
         model.sceneDidEnterBackground()
         model.sceneWillEnterForeground()
-        try await waitUntil { model.acceptsInput }
+        #expect(await states.next() == .suspended)
+        #expect(await states.next() == .connected)
         #expect(model.hasLoginPassword, "known to be there without asking")
         owner.withLock { $0.agrees = false }
         model.pasteLoginPassword()

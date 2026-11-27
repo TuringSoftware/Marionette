@@ -87,6 +87,8 @@ public struct SimulationScenario: Sendable {
     public var frameRate = 30
     /// How long a virtual display change takes to apply.
     public var reconfigurationDelay: Duration = .milliseconds(250)
+    /// How long the session takes to act on a suspend, as a real one that pauses its media does.
+    public var suspendDelay: Duration = .zero
     /// Reject virtual display requests smaller than this, as real servers do.
     public var minimumVirtualPointSize = PixelSize(width: 800, height: 600)
     public var maximumVirtualDisplays = 2

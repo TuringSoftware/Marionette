@@ -135,6 +135,10 @@ public final class SessionModel: Identifiable {
     @ObservationIgnored private let dependencies: Dependencies
     @ObservationIgnored private let translator = KeyTranslator()
     @ObservationIgnored private var session: (any RemoteSession)?
+    /// The last suspend or resume on its way to a session. Each waits for the one before: they run
+    /// off the main actor, and two started back to back could otherwise reach the session in either
+    /// order, leaving it suspended in the foreground.
+    @ObservationIgnored private var suspension: Task<Void, Never>?
     /// The SSH connection carrying a tunnelled session; closed after the session it carries.
     @ObservationIgnored private var tunnel: (any SSHSessionHandle)?
     @ObservationIgnored private var connectTask: Task<Void, Never>?
@@ -508,7 +512,7 @@ public final class SessionModel: Identifiable {
         }
         if isInBackground {
             // Reconnected while the app is away: nothing may draw or play until it is back.
-            Task { await session.suspend() }
+            setSuspended(true, session)
         }
         phase = .connected
         if !hasConnected {
@@ -863,7 +867,15 @@ public final class SessionModel: Identifiable {
         externalRenderer.suspendDrawing()
         clipboard.setActive(false)
         guard let session else { return }
-        Task { await session.suspend() }
+        setSuspended(true, session)
+    }
+
+    private func setSuspended(_ suspended: Bool, _ session: any RemoteSession) {
+        let previous = suspension
+        suspension = Task {
+            await previous?.value
+            if suspended { await session.suspend() } else { await session.resume() }
+        }
     }
 
     /// Back from the background. A connection that ended meanwhile is dialled again at once, and
@@ -872,7 +884,7 @@ public final class SessionModel: Identifiable {
         let wasInBackground = isInBackground
         isInBackground = false
         clipboard.setActive(true)
-        if let session { Task { await session.resume() } }
+        if let session { setSuspended(false, session) }
         guard wasInBackground else { return }
         foregroundRedialUntil = dependencies.clock.uptime + Self.foregroundRedialWindow
         if let attemptsUsed = heldReconnect {

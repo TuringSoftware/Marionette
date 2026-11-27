@@ -45,7 +45,10 @@ public final class SimulatedSession: RemoteSession {
         return empty
     }
 
-    public func suspend() async { core.setSuspended(true) }
+    public func suspend() async {
+        if core.scenario.suspendDelay > .zero { try? await Task.sleep(for: core.scenario.suspendDelay) }
+        core.setSuspended(true)
+    }
     public func resume() async { core.setSuspended(false) }
     public func disconnect() async { core.finish(.userInitiated) }
 

@@ -109,6 +109,22 @@ import Testing
         model.disconnect()
     }
 
+    /// Back before the session has finished suspending, as after a glance at another app: the
+    /// resume comes after the suspend, not before it.
+    @Test(.timeLimit(.minutes(1))) func aQuickTripToTheBackgroundLeavesTheSessionRunning() async throws {
+        var scenario = fastScenario()
+        scenario.suspendDelay = .milliseconds(100)
+        let fixture = try Fixture([scenario])
+        let model = try await fixture.connectedModel()
+        let session = fixture.backend.sessions[0]
+        var states = session.events().compactMap { if case .stateChanged(let state) = $0 { state } else { nil } }.makeAsyncIterator()
+        toBackground(model)
+        toForeground(model)
+        #expect(await states.next() == .suspended)
+        #expect(await states.next() == .connected, "resumed after the suspend")
+        model.disconnect()
+    }
+
     @Test func aSessionThatReconnectsInTheBackgroundIsSuspendedAndDrawsNothing() async throws {
         var slow = fastScenario()
         slow.phaseDelay = .milliseconds(80)
