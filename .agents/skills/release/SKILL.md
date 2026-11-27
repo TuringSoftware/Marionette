@@ -1,6 +1,6 @@
 ---
 name: release
-description: Release a build of Marionette to App Store Connect (TestFlight) - set the version and build in project.yml, commit and push the change, wait for the GitHub Actions run to pass, download its unsigned archive, then sign and upload it. Use it when asked to release, ship a build, upload to App Store Connect or TestFlight, or bump the version for a release. Takes an optional version and build; by default the version stays and the build goes up by one.
+description: Release a build of Marionette to App Store Connect (TestFlight) - set the version and build in project.yml, commit and push the change, wait for the GitHub Actions run to pass, download its unsigned archive, sign and upload it, then tag the version commit. Use it when asked to release, ship a build, upload to App Store Connect or TestFlight, or bump the version for a release. Takes an optional version and build; by default the version stays and the build goes up by one.
 ---
 
 # Releasing a build
@@ -8,7 +8,8 @@ description: Release a build of Marionette to App Store Connect (TestFlight) - s
 The workflow, the signing script and the settings they read are described in
 [Docs/testing.md](../../../Docs/testing.md) ("Local settings", "Continuous integration and
 releases"). Invoking this skill is the
-request to commit the version change to `main` and push it; nothing else is committed.
+request to commit the version change to `main` and push it, and to push a tag for it once the upload
+succeeds; nothing else is committed or pushed.
 
 ## 1. Before changing anything
 
@@ -68,3 +69,21 @@ uploaded, and that App Store Connect processes a build for some minutes before T
 If the upload fails after the push, the version commit stays as it is: fix the cause and upload the
 same archive again, or, if App Store Connect has already taken that build number, run this skill again
 for the next one. Never rewrite `main` to undo a pushed version change.
+
+## 7. Tag the release
+
+Only after the upload succeeds, tag the version commit from step 3 (not the tip of `main`, which
+another session may have moved) and push the tag alone:
+
+- The first build uploaded for a version is tagged `v<version>`, such as `v1.0.0`. Each later build
+  of the same version takes the next suffix: `v1.0.0-1`, then `v1.0.0-2`, and so on. The suffix
+  counts builds uploaded for that version, so it is not the build number minus one.
+- `git fetch --tags`, then count the tags already there with
+  `git tag -l "v<version>" "v<version>-*" | wc -l`. None means `v<version>`; otherwise the count is
+  the suffix.
+- If `git tag --points-at <sha>` already shows a tag for this version, the commit was tagged by an
+  earlier attempt; leave it.
+- `git tag -a <tag> -m "Marionette <version> (<build>)" <sha>`, then
+  `git push origin refs/tags/<tag>`. Do not push `main` here.
+
+Report the tag with the version and build.
