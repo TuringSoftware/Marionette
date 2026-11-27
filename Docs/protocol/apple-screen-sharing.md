@@ -452,6 +452,10 @@ Rules:
 - **Every offer gets new SSRCs from the Mac**, even with the same keys and viewer SSRCs, so a packet
   under an SSRC the leg has moved on from is a straggler and can be dropped. When the screen saver
   starts the Mac also recreates its streams with new SSRCs, without a new offer.
+- **A display that does not change gets no pictures.** In an idle session with two virtual displays
+  (macOS 27.0.1) no picture came on either leg for 8 s, while the Mac's report on each leg kept
+  coming once a second. After the keyframe that starts a stream, a viewer cannot count on another
+  picture to tell it anything about a display.
 
 **H.264** (payload type 123, offered alone with one tile) is the fallback for devices that cannot
 decode HEVC 4:4:4:

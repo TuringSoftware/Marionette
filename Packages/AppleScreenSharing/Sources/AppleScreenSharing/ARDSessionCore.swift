@@ -161,6 +161,9 @@ final class ARDSessionCore: Sendable, InputSink {
         /// High Performance: a display change is out and its layout has not arrived, so pictures
         /// still in flight are of displays about to be replaced.
         var awaitingNewLayout = false
+        /// High Performance: the displays that were live when the display change now out was asked
+        /// for. They are live again if the Mac never takes the change up.
+        var liveBeforeChange: Set<DisplayID> = []
         /// High Performance: the displays are the ones the session asked for, not the opening ones.
         var hasSessionDisplays = false
         /// High Performance: when the Mac answered the latest offer, while no display change is out.
@@ -206,6 +209,24 @@ final class ARDSessionCore: Sendable, InputSink {
         /// The control connection's silence counts from here: the start, or the return from the
         /// background, where sockets do not run.
         var controlWatchEpoch = ContinuousClock.now
+    }
+
+    /// Tells subscribers the layout as it is now. The engine and each display's decoder change it
+    /// from threads of their own; were each to send the layout as it left it, an older one could
+    /// arrive last, and a display would stay reconfiguring for good on a still desktop.
+    func announceLayout() {
+        layoutAnnouncements.withLock { _ in
+            events.send(.layoutChanged(shared.withLock { $0.layout }))
+        }
+    }
+
+    /// Ends the wait for the session's displays and arms the media watchdog, once every one of them
+    /// is live.
+    func displaysMayBeReady() {
+        let isReady = shared.withLock { $0.hasSessionDisplays && $0.layout.displays.allSatisfy { $0.state == .live } }
+        guard isReady else { return }
+        if !shared.withLock({ $0.isMediaWatchArmed }) { restartMediaWatch(arming: true) }
+        ready.resolve(.success(()))
     }
 
     /// Starts the watchdog's clock again: at the first picture, when the app returns from the
@@ -330,6 +351,9 @@ final class ARDSessionCore: Sendable, InputSink {
     let fileTransfers: ARDFileTransfers
     let fileDrags = ARDFileDrags()
 
+    /// Held while a layout is read and sent, so that announcements arrive in the order of the
+    /// layouts they carry; see ``announceLayout()``.
+    private let layoutAnnouncements = Mutex<Void>(())
     /// One decoder per picture leg, fed from that leg's media queue and replaced by the engine for
     /// each offer. The lock guards only the list: no call into VideoToolbox is made under it.
     let videoDecoders = Mutex<[LegDecoder]>([])
@@ -876,7 +900,7 @@ final class ARDSessionCore: Sendable, InputSink {
             // The Mac may now predict a refresh picture from this one, which the decoder holds.
             shared.withLock { $0.mediaReceiver }?.acknowledge(leg: leg, ssrc: picture.source, timestamp: picture.timestamp)
             let isHDR = picture.isHDR
-            let target: (hub: FrameHub, id: DisplayID, generation: UInt64, becameLive: DesktopLayout?)? = shared.withLock { shared in
+            let target: (hub: FrameHub, id: DisplayID, generation: UInt64, layoutChanged: Bool)? = shared.withLock { shared in
                 guard shared.legDisplays.indices.contains(leg) else { return nil }
                 let id = shared.legDisplays[leg]
                 guard let hub = shared.hubs[id], let display = shared.layout[id] else { return nil }
@@ -884,29 +908,23 @@ final class ARDSessionCore: Sendable, InputSink {
                 guard display.pixelSize == PixelSize(width: picture.width, height: picture.height),
                       let index = shared.layout.displays.firstIndex(where: { $0.id == id })
                 else { return nil }
-                var announce: DesktopLayout?
+                var changed = false
                 if display.state != .live, !shared.awaitingNewLayout {
                     shared.layout.displays[index].state = .live
-                    announce = shared.layout
+                    changed = true
                 }
                 // Whether a display is HDR is what its pictures are, whatever was asked for.
                 if display.isHDR != isHDR {
                     shared.layout.displays[index].isHDR = isHDR
-                    announce = shared.layout
+                    changed = true
                 }
-                return (hub, id, shared.layout.generation, announce)
+                return (hub, id, shared.layout.generation, changed)
             }
             guard let target else { return }
             let size = PixelSize(width: picture.width, height: picture.height)
             target.hub.publish(DisplayFrame(display: target.id, surface: picture.surface, pixelSize: size, damage: .full(size), layoutGeneration: target.generation))
-            if let layout = target.becameLive {
-                events.send(.layoutChanged(layout))
-            }
-            let isReady = shared.withLock { $0.hasSessionDisplays && $0.layout.displays.allSatisfy { $0.state == .live } }
-            if isReady {
-                if !shared.withLock({ $0.isMediaWatchArmed }) { restartMediaWatch(arming: true) }
-                ready.resolve(.success(()))
-            }
+            if target.layoutChanged { announceLayout() }
+            displaysMayBeReady()
         }
     }
 

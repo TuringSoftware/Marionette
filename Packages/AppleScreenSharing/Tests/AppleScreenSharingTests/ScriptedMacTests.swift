@@ -1493,6 +1493,48 @@ private func expected(width: Int, height: Int, generation: (Int, Int) -> Int = {
         await session.disconnect()
     }
 
+    /// The scripted Mac, like a real one with a still desktop, sends no picture that would say so.
+    @Test func aDisplayIsLiveAgainOnceAChangeTheMacNeverAnswersTimesOut() async throws {
+        let transport = Self.transport { $0.unansweredConfigurations = [2] }
+        var backend = Self.backend
+        backend.sessionTiming.displayChangeTimeout = .milliseconds(600)
+        let session = try await backend.connect(Self.request(transport))
+        let events = session.events()
+        let configuration = try #require(session.capabilities.displayConfiguration.value)
+        let before = try Self.display(session)
+        #expect(before.state == .live)
+        await #expect(throws: ARDEngine.DisplayChangeError.timedOut) {
+            try await configuration.setVirtualDisplays([Self.size(400, 300)])
+        }
+        let after = try Self.display(session)
+        #expect(after.state == .live)
+        #expect(after.pixelSize == before.pixelSize)
+        await session.disconnect()
+        var announced: [RemoteDisplay.State] = []
+        for await event in events {
+            if case .layoutChanged(let layout) = event, let state = layout.displays.first?.state { announced.append(state) }
+        }
+        #expect(announced == [.reconfiguring, .live])
+    }
+
+    /// Displays asked for again are asked because their pictures stopped; an unanswered request
+    /// leaves nothing known to be good to go back to.
+    @Test func aDisplayStaysReconfiguringWhenTheMacNeverBringsItBack() async throws {
+        let transport = Self.transport { $0.unansweredConfigurations = [2] }
+        let notes = Notes()
+        var backend = Self.backend
+        backend.sessionTiming.displayChangeTimeout = .milliseconds(600)
+        backend.diagnostics = { line in notes.lines.withLock { $0.append(line) } }
+        let session = try await backend.connect(Self.request(transport))
+        #expect(try Self.display(session).state == .live)
+        transport.latest.sendStatus(17)
+        await until("the request to time out") {
+            notes.lines.withLock { $0.contains { $0.hasPrefix("the Mac did not take up the display configuration") } }
+        }
+        #expect(try Self.display(session).state == .reconfiguring)
+        await session.disconnect()
+    }
+
     @Test(arguments: [
         (kind: UInt32(1), subCode: UInt32(1), failure: ConnectionFailure.busy(detail: "Another viewer is using this Mac's High Performance stream.")),
         (kind: 2, subCode: 0, failure: .modeUnavailable(mode: .highPerformance, reason: .notSupportedByServer)),

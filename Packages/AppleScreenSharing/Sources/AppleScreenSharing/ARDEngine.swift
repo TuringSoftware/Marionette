@@ -609,10 +609,11 @@ actor ARDEngine {
             shared.placements = placements
             shared.legDisplays = legDisplays
             shared.awaitingNewLayout = false
+            shared.liveBeforeChange = []
             return retired
         }
         for hub in retired { hub.finish() }
-        core.events.send(.layoutChanged(desktop))
+        core.announceLayout()
     }
 
     // MARK: High Performance negotiation
@@ -643,7 +644,10 @@ actor ARDEngine {
             // displays already showing, which brings no new layout.
             state.changeOutstanding = false
             highPerformance = state
-            core.shared.withLock { $0.awaitingNewLayout = false }
+            core.shared.withLock { shared in
+                shared.awaitingNewLayout = false
+                shared.liveBeforeChange = []
+            }
             core.note("the Mac named its media ports: sound \(audio), pictures \(videoPorts)" + (hdr.contains(true) ? ", HDR \(hdr)" : ""))
             if try await !offerIfReady(), highPerformance?.reassertPending == true {
                 // No stream can start on these displays; ask for the session's own now.
@@ -818,14 +822,20 @@ actor ARDEngine {
         // Input sent while the Mac makes the displays is lost with the old ones; it waits for the
         // new layout, and a while after it.
         core.holdInputAfterDisplayChange(until: .now + core.timing.displayChangeTimeout)
-        let reconfiguring: DesktopLayout = core.shared.withLock { shared in
+        core.shared.withLock { shared in
+            if isReassertion {
+                // Asked again because their stream stopped: what they show is not known to be good.
+                shared.liveBeforeChange = []
+            } else {
+                // A change that follows one still unanswered finds them reconfiguring already.
+                shared.liveBeforeChange.formUnion(shared.layout.displays.filter { $0.state == .live }.map(\.id))
+            }
             for index in shared.layout.displays.indices { shared.layout.displays[index].state = .reconfiguring }
             shared.awaitingNewLayout = true
             shared.hasSessionDisplays = true
             shared.lastAnswerAt = nil
-            return shared.layout
         }
-        core.events.send(.layoutChanged(reconfiguring))
+        core.announceLayout()
     }
 
     /// Asks for the session's displays again, now or once the request that is out is answered.
@@ -873,6 +883,22 @@ actor ARDEngine {
             if state.desired != unanswered, state.sessionSizeApplied {
                 sendDisplayChange()
             } else {
+                // Live again, as they were: a Mac sends a picture only when its screen changes, so
+                // on a still desktop none would come to say so.
+                let restored = core.shared.withLock { shared in
+                    let live = shared.liveBeforeChange
+                    shared.liveBeforeChange = []
+                    var changed = false
+                    for index in shared.layout.displays.indices where live.contains(shared.layout.displays[index].id) && shared.layout.displays[index].state != .live {
+                        shared.layout.displays[index].state = .live
+                        changed = true
+                    }
+                    return changed
+                }
+                if restored {
+                    core.announceLayout()
+                    core.displaysMayBeReady()
+                }
                 resolveVirtualDisplayWaiters(.failure(.timedOut))
             }
         case .offer:
