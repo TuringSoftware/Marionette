@@ -31,15 +31,25 @@ export SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH="${SWT_EXPERIMENTAL_MAXIMU
 status=0
 output="$(mktemp)"
 trap 'rm -f "$output"' EXIT
+# Prints the lines matching $1, and each issue or warning with the lines under it that say what
+# was expected and what came: they are what a failure on CI has to be understood from.
+summarise() {
+    awk -v keep="$1" '
+        /recorded (an issue|a warning)/ { print; details = 12; next }
+        details > 0 && !/(Test|Suite) .*(started|passed|failed|recorded)|Test run/ { print; details--; next }
+        { details = 0 }
+        $0 ~ keep { print }
+    ' "$output"
+}
 for manifest in Packages/*/Package.swift; do
     package="$(dirname "$manifest")"
     [[ -d "$package/Tests" ]] || continue
     echo "==> $package"
     if swift test --package-path "$package" >"$output" 2>&1; then
-        grep -E "Test run with" "$output" || true
+        summarise "Test run with"
     else
         status=1
-        grep -E "error:|recorded an issue|failed|Test run with" "$output" || tail -20 "$output"
+        [[ -n "$(summarise "error:|failed|Test run with")" ]] && summarise "error:|failed|Test run with" || tail -20 "$output"
     fi
 done
 exit $status

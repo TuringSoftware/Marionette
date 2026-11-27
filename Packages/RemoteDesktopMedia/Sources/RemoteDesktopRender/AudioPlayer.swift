@@ -152,6 +152,13 @@ public final class AudioPlayer: Sendable {
     func renderOffline(frameCount: Int) -> [Float]? {
         queue.sync { pipeline.renderOffline(frameCount: frameCount) }
     }
+
+    /// Whether the engine has reported every scheduled frame played. It reports from its own
+    /// thread a moment after rendering them, and until then the player counts them as queued.
+    /// For tests.
+    var hasPlayedEverything: Bool {
+        queue.sync { pipeline.queuedFrames == 0 }
+    }
 }
 
 /// Counts frames the player node has finished with. Written from the audio engine's callback thread,
@@ -293,6 +300,7 @@ private final class Pipeline: @unchecked Sendable {
 
     var isRunning: Bool { engine?.isRunning ?? false }
     var underruns: Int { cushion.underruns }
+    var queuedFrames: Int { max(0, scheduledFrames - counter.value) }
 
     func schedule(_ chunk: AudioChunk, muted: Bool) -> Outcome {
         let frames = chunk.frameCount
@@ -315,7 +323,7 @@ private final class Pipeline: @unchecked Sendable {
         }
         nextPresentation = chunk.presentationTime + duration
 
-        let queued = Duration.seconds(Double(max(0, scheduledFrames - counter.value)) / chunk.sampleRate)
+        let queued = Duration.seconds(Double(queuedFrames) / chunk.sampleRate)
         let leadIn: Duration
         switch cushion.admit(queued: queued, at: .now) {
         case .drop:

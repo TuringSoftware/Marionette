@@ -4,6 +4,7 @@
 import Darwin
 public import Foundation
 public import SwiftSSH2
+import Testing
 
 public struct TestFailure: Error, CustomStringConvertible {
     public var description: String
@@ -168,7 +169,13 @@ public final class LocalSSHServer: @unchecked Sendable {
         PubkeyAuthentication yes
         AllowTcpForwarding yes
         Subsystem sftp /usr/libexec/sftp-server
-        LogLevel ERROR
+        LogLevel DEBUG1
+        # Tests fail logins on purpose, all from 127.0.0.1. OpenSSH 9.8 and later then refuse the
+        # address for a while once its failures add up to 15 s of penalty (four failed logins),
+        # closing new connections before the banner, and past ten connections not yet logged in
+        # drop some at random; tests on a slow machine get there.
+        PerSourcePenalties no
+        MaxStartups 100
         """
         try configuration.write(toFile: path("sshd_config"), atomically: true, encoding: .utf8)
 
@@ -210,9 +217,34 @@ public final class LocalSSHServer: @unchecked Sendable {
         if process.isRunning { process.waitUntilExit() }
     }
 
+    /// A connected session, not logged in.
+    ///
+    /// On GitHub's runner a connection now and then gets no banner, until sshd gives up on it
+    /// two minutes later. In those caught with sshd's log it was the first connection to a new
+    /// server, and sshd had not started the process that answers it.
+    /// Such a handshake is abandoned after `handshakeLimit` and tried again, and recorded as a
+    /// warning with the end of sshd's log.
     public func connect() async throws -> SSHSession {
-        try await SSHSession.connect(over: try SocketTransport(port: port))
+        var attempt = 1
+        while true {
+            do {
+                return try await SSHSession.connect(over: try SocketTransport(port: port), timeout: Self.handshakeLimit)
+            } catch let error as SSHError where attempt < 3 {
+                switch error {
+                case .timedOut, .handshakeFailed:
+                    let log = (try? String(contentsOf: directory.appending(path: "sshd.log"), encoding: .utf8)) ?? ""
+                    let tail = log.split(separator: "\n").suffix(40).joined(separator: " | ")
+                    Issue.record("handshake \(attempt) with the local sshd failed (\(error)); sshd's log ends: \(tail)", severity: .warning)
+                    attempt += 1
+                default:
+                    throw error
+                }
+            }
+        }
     }
+
+    /// Far longer than a handshake with the local sshd takes on a loaded machine.
+    static let handshakeLimit = Duration.seconds(20)
 
     private let authorizing = NSLock()
 

@@ -1369,15 +1369,18 @@ private func expected(width: Int, height: Int, generation: (Int, Int) -> Int = {
             $0.packetPayload = 100
         }
         var backend = Self.backend
+        // The session looks at the loss once a second, so a window lasts that long and two lossy
+        // ones in a row take a few seconds. A picture here is three packets, and a slow machine
+        // makes few pictures: the floor is low enough that every window counts.
         backend.sessionTiming.lossWindow = .milliseconds(400)
-        backend.sessionTiming.lossWindowPackets = 40
+        backend.sessionTiming.lossWindowPackets = 10
         let size = Self.size(320, 200)
         let session = try await backend.connect(Self.request(transport, displays: [size]))
         let mac = transport.latest
         try await Task.sleep(for: .seconds(1))
         #expect(mac.configurations.count == 2, "stepped down with no loss")
         mac.losePackets(every: 3)
-        await until("the step down", timeout: .seconds(5)) { mac.configurations.count == 3 }
+        await until("the step down", timeout: .seconds(20)) { mac.configurations.count == 3 }
         #expect(mac.configurations.last == [VirtualDisplayMode(pixelWidth: 320, pixelHeight: 192, pointWidth: 320, pointHeight: 192)])
         #expect(!session.state.isDisconnected)
         await session.disconnect()
@@ -1460,12 +1463,15 @@ private func expected(width: Int, height: Int, generation: (Int, Int) -> Int = {
 
     /// Resizes in a row: the one in flight finishes, the ones behind it collapse into the newest.
     @Test func resizesInARowSupersedeEachOther() async throws {
-        let transport = Self.transport { $0.layoutDelay = .milliseconds(150) }
+        let transport = Self.transport { $0.layoutDelay = .milliseconds(600) }
         let session = try await Self.backend.connect(Self.request(transport))
         let configuration = try #require(session.capabilities.displayConfiguration.value)
         let sizes = [Self.size(400, 300), Self.size(420, 300), Self.size(440, 300), Self.size(460, 300)]
-        var resizes: [Task<Void, any Error>] = []
-        for size in sizes {
+        var resizes = [Task { try await configuration.setVirtualDisplays([sizes[0]]) }]
+        // The rest while the Mac is still making the first, which it holds long enough for a
+        // slow machine; a moment apart, so that they are asked for in order.
+        await until("the first resize to be sent") { transport.latest.configurations.count == 3 }
+        for size in sizes.dropFirst() {
             resizes.append(Task { try await configuration.setVirtualDisplays([size]) })
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -1688,7 +1694,9 @@ private func expected(width: Int, height: Int, generation: (Int, Int) -> Int = {
         session.input.send(.pointer(PointerEvent(display: display.id, position: PixelPoint(x: 5, y: 6), buttons: .primary, layoutGeneration: session.layout.generation)))
         await until("the presses") { mac.record.withLock { $0.messages.contains(.pointer(mask: 1, x: 5, y: 6)) } }
         await session.disconnect()
-        #expect(mac.record.withLock { $0.viewerClosed }, "disconnect returned before the connection closed")
+        #expect(await mac.isConnectionClosed, "disconnect returned before the connection closed")
+        // The Mac reads what came before the close in its own time.
+        await until("the Mac to read to the close") { mac.record.withLock { $0.viewerClosed } }
         let input = mac.record.withLock { $0.messages.filter { if case .key = $0 { true } else if case .pointer = $0 { true } else { false } } }
         #expect(input.suffix(2).contains(.key(keysym: 0xffeb, isDown: false)))
         #expect(input.suffix(2).contains(.pointer(mask: 0, x: 5, y: 6)))
@@ -1821,14 +1829,17 @@ private func expected(width: Int, height: Int, generation: (Int, Int) -> Int = {
         }
         let notes = Notes()
         var backend = Self.hdrBackend(.high, notes: notes)
+        // The session looks at the loss once a second, so a window lasts that long and two lossy
+        // ones in a row take a few seconds. A picture here is three packets, and a slow machine
+        // makes few pictures: the floor is low enough that every window counts.
         backend.sessionTiming.lossWindow = .milliseconds(400)
-        backend.sessionTiming.lossWindowPackets = 40
+        backend.sessionTiming.lossWindowPackets = 10
         let session = try await backend.connect(Self.request(transport, displays: [Self.hdrSize(true)]))
         let mac = transport.latest
         #expect(mac.configurations.last?.first?.isHDR == true)
         #expect(session.capabilities.highDynamicRange.isAvailable)
         mac.losePackets(every: 3)
-        await until("the step down", timeout: .seconds(5)) { mac.configurations.count == 3 }
+        await until("the step down", timeout: .seconds(20)) { mac.configurations.count == 3 }
         #expect(mac.configurations.last?.first?.isHDR == false)
         #expect(session.capabilities.highDynamicRange.unavailableReason == .lowBandwidth)
         await session.disconnect()

@@ -81,33 +81,44 @@ struct AudioPlayerTests {
         player.stop()
     }
 
-    @Test func muteSilencesOutputWithoutStoppingTheStream() throws {
+    @Test func muteSilencesOutputWithoutStoppingTheStream() async throws {
         let player = offlinePlayer()
+        // One stream throughout, however long the test takes: chunks stamped as they are made
+        // would look like a new stream after a pause, which starts without the cushion's silence.
+        var presentation = ContinuousClock.now
+        func next() -> AudioChunk {
+            defer { presentation += .milliseconds(10) }
+            return tone(at: presentation)
+        }
         player.isMuted = true
         #expect(player.isMuted)
-        for _ in 0..<2 { player.enqueue(tone()) }
+        for _ in 0..<2 { player.enqueue(next()) }
         player.waitUntilIdle()
         #expect(player.isEngineRunning)
         #expect(player.scheduledChunkCount == 2)
         #expect(peak(try #require(player.renderOffline(frameCount: 960))) < 0.001)
+        // The engine says it has played them a moment after rendering them.
+        #expect(await eventually { player.hasPlayedEverything })
 
         player.isMuted = false
-        for _ in 0..<2 { player.enqueue(tone()) }
+        for _ in 0..<2 { player.enqueue(next()) }
         player.waitUntilIdle()
         // The queue had run dry, so the cushion grew: 40 ms of silence come first.
         #expect(peak(try #require(player.renderOffline(frameCount: 1920 + 960))) > 0.3)
 
-        // Muting while running takes effect on audio already queued. The mixer fades over its next
-        // render cycle rather than cutting, so the silence is checked after that.
-        for _ in 0..<4 { player.enqueue(tone()) }
+        // Muting while running takes effect on audio already queued. Having run dry again, the queue
+        // starts with 80 ms of silence, over which the mixer fades out; the tones after it are
+        // what is checked.
+        #expect(await eventually { player.hasPlayedEverything })
+        for _ in 0..<4 { player.enqueue(next()) }
         player.isMuted = true
         player.waitUntilIdle()
-        _ = try #require(player.renderOffline(frameCount: 960))
-        #expect(peak(try #require(player.renderOffline(frameCount: 960))) < 0.001)
+        _ = try #require(player.renderOffline(frameCount: 3840))
+        #expect(peak(try #require(player.renderOffline(frameCount: 1920))) < 0.001)
         player.stop()
     }
 
-    @Test func dropsChunksWhenPlaybackFallsBehind() throws {
+    @Test func dropsChunksWhenPlaybackFallsBehind() async throws {
         let player = offlinePlayer()
         // 600 ms of audio with nobody pulling it out of the engine.
         for _ in 0..<60 { player.enqueue(tone()) }
@@ -120,6 +131,7 @@ struct AudioPlayerTests {
 
         // Once the queue drains, chunks are accepted again; having run dry, it keeps more in hand.
         _ = try #require(player.renderOffline(frameCount: 48_000 / 2))
+        #expect(await eventually { player.hasPlayedEverything })
         player.enqueue(tone())
         player.waitUntilIdle()
         #expect(player.scheduledChunkCount == statistics.scheduledChunks + 1)

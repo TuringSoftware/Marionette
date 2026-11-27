@@ -48,6 +48,8 @@ actor PipeHalf {
 
     var availableCount: Int { buffer.count }
 
+    var isClosedNow: Bool { isClosed }
+
     var firstAvailableByte: UInt8? { buffer.first }
 
     func takeAvailable() -> Data {
@@ -112,6 +114,12 @@ final class PipeStream: ByteStream {
 
     func stallIncoming(_ stalled: Bool) async {
         await incoming.setStalled(stalled)
+    }
+
+    /// The other end has closed the connection (or this one has), whether or not what it wrote
+    /// before has been read.
+    var isIncomingClosed: Bool {
+        get async { await incoming.isClosedNow }
     }
 
     func readExactly(_ count: Int) async throws -> Data {
@@ -345,6 +353,12 @@ final class ScriptedMac: Sendable {
     /// The Mac's High Performance work, done one step at a time in order.
     private let jobs: AsyncStream<@Sendable () async -> Void>
     private let jobsContinuation: AsyncStream<@Sendable () async -> Void>.Continuation
+
+    /// The viewer has closed the connection. Set as it closes, where `Record.viewerClosed` waits
+    /// until the Mac has read up to the close.
+    var isConnectionClosed: Bool {
+        get async { await stream.isIncomingClosed }
+    }
 
     init(stream: PipeStream, options: Options = Options()) {
         self.stream = stream
