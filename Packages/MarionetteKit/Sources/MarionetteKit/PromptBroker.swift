@@ -248,6 +248,32 @@ public final class PromptBroker: PromptHandler, FallbackPromptHandler, SecretAcc
         sessionCredentials[secretKey(for: context)].map { ($0.username, $0.password) }
     }
 
+    /// Whether there is a password for the computer itself: sent this session, or saved. Asks no one.
+    public var hasLoginPassword: Bool {
+        let key = secretKey(for: .remoteDesktop(host: ""))
+        if let known = sessionCredentials[key] { return !known.password.isEmpty }
+        return !staleSaved.contains(key) && secrets.hasSecret(for: key)
+    }
+
+    /// The computer's own password, for typing at the remote machine: what was sent this session,
+    /// else the saved one. A computer whose password requires the device owner asks them first,
+    /// also for a password that was typed at sign-in and never read from behind that check. `nil`
+    /// when there is none or the owner did not agree.
+    public func loginPassword() async -> String? {
+        let key = secretKey(for: .remoteDesktop(host: ""))
+        let reason = String(localized: "Paste the password for “\(computer.displayName)”.", bundle: #bundle)
+        if let known = sessionCredentials[key] {
+            guard !known.password.isEmpty else { return nil }
+            if computer.passwordProtection.requiresUserPresence, !(await secretAccess.authenticate(reason: reason)) { return nil }
+            return known.password
+        }
+        guard !staleSaved.contains(key) else { return nil }
+        guard let password = (try? await secrets.unlockedSecret(for: key, access: secretAccess, reason: reason)) ?? nil, !password.isEmpty else {
+            return nil
+        }
+        return password
+    }
+
     // MARK: Session life cycle
 
     /// The connection was established: whatever was sent is right. This is the only place saved

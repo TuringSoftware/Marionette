@@ -262,6 +262,9 @@ public final class SessionUIState {
     public internal(set) var modifiers = ModifierLatch()
     public internal(set) var accessoryPage: AccessoryPage = .keys
     public internal(set) var isFilesPresented = false
+    /// The field for a password to type at the remote machine is showing. It has the keyboard while
+    /// it does.
+    public internal(set) var isPasswordEntryPresented = false
 
     init(preferences: SessionPreferences) {
         inputMode = preferences.inputMode
@@ -277,6 +280,8 @@ public final class SessionUIState {
     /// keyboard while the picture is touched directly, a trackpad in trackpad mode.
     public var deckSurface: DeckSurface? {
         if isDeckDocked { return inputPanel.docked == .trackpad ? .trackpad : .keyboard }
+        // The password field brings the system keyboard up; the deck makes way and comes back.
+        if isPasswordEntryPresented { return nil }
         switch inputPanel {
         case .trackpad: return .trackpad
         case .deckKeyboard: return .keyboard

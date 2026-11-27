@@ -157,6 +157,9 @@ public struct ConnectionLadder: Sendable {
         public var session: any RemoteSession
         public var step: Step
         public var fallbacks: [Fallback]
+        /// The rung speaks the computer's own protocol. One that does not (plain VNC for a Mac) is
+        /// never given the computer's saved or cached credentials.
+        public var usesOwnProtocol = true
         /// The SSH connection of the tunnel the session runs through, if it has one. Whoever holds
         /// the outcome closes it once the session has ended; ``close()`` does both.
         public var ssh: (any SSHSessionHandle)?
@@ -289,7 +292,7 @@ public struct ConnectionLadder: Sendable {
                     await session.disconnect()
                     throw ConnectionFailure.notEncrypted(detail: String(localized: "The session would not be encrypted.", bundle: #bundle))
                 }
-                return Outcome(session: session, step: step, fallbacks: fallbacks, ssh: transport.ssh)
+                return Outcome(session: session, step: step, fallbacks: fallbacks, usesOwnProtocol: isOwn, ssh: transport.ssh)
             } catch {
                 if case .otherProtocol = error { otherProtocolBackends.insert(step.backendID) }
                 let next = steps[(index + 1)...].first(where: remains)

@@ -268,6 +268,33 @@ final class ScreenshotTests: XCTestCase {
     }
 
     @MainActor
+    func testSessionPasteMenu() {
+        capture("28b-session-paste-menu", autoConnect: true) { app in
+            waitForSession(app)
+            UIPasteboard.general.string = "Copied on this device"
+            app.openPasteMenu()
+            app.pasteMenuItem("Login Password").waitToExist()
+        }
+        capture("28c-session-password-entry", autoConnect: true) { app in
+            waitForSession(app)
+            app.openPasteMenu()
+            app.pasteMenuItem("Password…").waitToExist().tap()
+            app.secureTextFields["password-entry-field"].waitToExist()
+        }
+        // Pressing the glyph reads the clipboard, which XCUITest cannot do before iOS 27.
+        guard #available(iOS 27, *) else { return }
+        // Emptied, so that what the app pastes is its own: the simulated Mac's copy.
+        UIPasteboard.general.items = []
+        capture("28d-session-paste-tip", autoConnect: true) { app in
+            waitForSession(app)
+            app.waitForTheMacsCopy()
+            app.showControls()
+            app.buttons["toolbar-paste"].waitToExist().tap()
+            app.staticTexts["Paste Passwords"].waitToExist()
+        }
+    }
+
+    @MainActor
     func testSettings() {
         capture("26-settings") { app in
             app.buttons["computer-Studio Mac"].waitToExist()

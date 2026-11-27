@@ -16,6 +16,7 @@ struct RemoteDisplayStage: View {
     @Environment(\.displayScale) private var displayScale
     @Environment(\.layoutDirection) private var layoutDirection
     @Environment(\.launchOptions) private var launchOptions
+    @Environment(\.foldContext) private var fold
 
     private struct Metrics: Equatable {
         var size: CGSize
@@ -23,9 +24,23 @@ struct RemoteDisplayStage: View {
         var scale: CGFloat
     }
 
+    /// Folded like a laptop the stage has the pane above the fold and nothing under it: below are
+    /// the fold and the other pane, where a system keyboard comes up with its edge against this
+    /// pane's. Running under that keyboard, or counting it as this view's own margin, would size the
+    /// stage, and with it the remote display, for both panes (iOS 27.1, iPhone Duo).
+    private var isDocked: Bool { fold.pose == .docked }
+    private var ignoredRegions: SafeAreaRegions { isDocked ? .container : .all }
+    private var ignoredEdges: Edge.Set { isDocked ? [.top, .horizontal] : .all }
+
+    private func stageInsets(_ proxy: GeometryProxy) -> EdgeInsets {
+        var insets = proxy.safeAreaInsets
+        if isDocked { insets.bottom = 0 }
+        return insets
+    }
+
     var body: some View {
         GeometryReader { proxy in
-            let insets = proxy.safeAreaInsets
+            let insets = stageInsets(proxy)
             let metrics = Metrics(
                 size: CGSize(
                     width: proxy.size.width + insets.leading + insets.trailing,
@@ -43,7 +58,7 @@ struct RemoteDisplayStage: View {
                 InputCapture(
                     session: session,
                     surface: .stage,
-                    takesKeyboard: session.phase == .connected && session.prompts.pending == nil,
+                    takesKeyboard: session.phase == .connected && session.prompts.pending == nil && !session.uiState.isPasswordEntryPresented,
                     showsKeyboard: session.uiState.isKeyboardRequested,
                     accessibilityLabel: String(localized: "Remote Display, \(session.selectedDisplay?.name ?? session.title)"),
                     reportsDiagnostics: launchOptions.reportsDiagnostics
@@ -51,7 +66,7 @@ struct RemoteDisplayStage: View {
                 // In the picture's coordinates, like the two above, so the remote pointer can reach it.
                 RemoteDragWell(session: session, surface: .device)
             }
-            .ignoresSafeArea()
+            .ignoresSafeArea(ignoredRegions, edges: ignoredEdges)
             // Out of full screen the picture keeps running under the bars, as in full screen; a
             // frosted edge keeps the title and the bar's buttons legible over it.
             .overlay {
@@ -59,7 +74,7 @@ struct RemoteDisplayStage: View {
                     VerticalBarEdgeReader { edge in
                         BarEdgeEffect(insets: insets, verticalBarEdge: edge)
                     }
-                    .ignoresSafeArea()
+                    .ignoresSafeArea(ignoredRegions, edges: ignoredEdges)
                     .transition(.opacity)
                 }
             }
@@ -67,22 +82,32 @@ struct RemoteDisplayStage: View {
             // bottom: the keyboard, the deck, or nothing.
             .overlay(alignment: .bottom) {
                 VerticalBarEdgeReader { edge in
-                    ControlStrip(
-                        session: session,
-                        bottomInset: insets.bottom,
-                        leadingInset: insets.leading,
-                        trailingInset: insets.trailing,
-                        barEdge: edge
-                    )
+                    if session.uiState.isPasswordEntryPresented {
+                        PasswordEntryBar(
+                            session: session,
+                            bottomInset: insets.bottom,
+                            leadingInset: insets.leading,
+                            trailingInset: insets.trailing,
+                            barEdge: edge
+                        )
+                    } else {
+                        ControlStrip(
+                            session: session,
+                            bottomInset: insets.bottom,
+                            leadingInset: insets.leading,
+                            trailingInset: insets.trailing,
+                            barEdge: edge
+                        )
+                    }
                 }
-                .ignoresSafeArea()
+                .ignoresSafeArea(ignoredRegions, edges: ignoredEdges)
             }
             .onChange(of: metrics, initial: true) { _, new in
                 session.stageLayoutChanged(size: new.size, safeArea: new.insets, deviceScale: new.scale)
             }
         }
         // The keyboard must not resize the stage; the viewport model slides the desktop instead.
-        .ignoresSafeArea(.keyboard)
+        .ignoresSafeArea(isDocked ? [] : .keyboard)
         .background { Color.black.ignoresSafeArea() }
         .overlay { StageStatus(session: session) }
         .overlay(alignment: .top) {

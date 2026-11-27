@@ -108,7 +108,10 @@ public final class SessionModel: Identifiable {
     @ObservationIgnored public let renderer = DisplayRenderer()
     /// Pastes bringing this device's clipboard over, and the input that arrived meanwhile.
     @ObservationIgnored private var pastesInFlight = 0
-    @ObservationIgnored private var heldDuringPaste: [InputEvent] = []
+    @ObservationIgnored private var heldDuringPaste: [HeldInput] = []
+    /// The session runs on a rung that does not speak the computer's own protocol
+    /// (``ConnectionLadder/Outcome/usesOwnProtocol``).
+    @ObservationIgnored private var isOnFallbackRung = false
     /// Draws the display shown on an attached monitor (External Only, Both Displays). Like
     /// ``renderer`` it belongs to the model, so the monitor's scene only attaches its layer.
     @ObservationIgnored public let externalRenderer = DisplayRenderer()
@@ -462,6 +465,7 @@ public final class SessionModel: Identifiable {
     private func attach(_ outcome: ConnectionLadder.Outcome) {
         let session = outcome.session
         self.session = session
+        isOnFallbackRung = !outcome.usesOwnProtocol
         tunnel = outcome.ssh
         // Subscribe before reading the current values so that nothing can slip between the two.
         let events = session.events()
@@ -674,6 +678,7 @@ public final class SessionModel: Identifiable {
         externalRenderer.stop()
         externalShownDisplay = nil
         session = nil
+        uiState.isPasswordEntryPresented = false
     }
 
     /// Hands back the tunnel's SSH connection, if any, so it can be closed after the session.
@@ -1067,6 +1072,22 @@ public final class SessionModel: Identifiable {
 
     public func setFilesPresented(_ presented: Bool) {
         uiState.isFilesPresented = presented
+    }
+
+    /// Shows or hides the field for a password to type at the remote machine. The field takes the
+    /// keyboard from the remote display, so whatever is held there is let go of first.
+    public func setPasswordEntryPresented(_ presented: Bool) {
+        guard presented != uiState.isPasswordEntryPresented, acceptsInput || !presented else { return }
+        if presented { releaseAllInput() }
+        uiState.isPasswordEntryPresented = presented
+        if uiState.deckSurface == nil { setDeckOverlap(0) }
+    }
+
+    /// What the password field holds is sent: typed at the remote machine, and the field goes.
+    public func submitPasswordEntry(_ password: String) {
+        guard uiState.isPasswordEntryPresented else { return }
+        typePassword(password)
+        uiState.isPasswordEntryPresented = false
     }
 
     public func setAccessoryPage(_ page: AccessoryPage) {
@@ -1655,6 +1676,38 @@ public final class SessionModel: Identifiable {
         bringClipboardOver(text)
     }
 
+    /// Types a password at the remote machine as key presses. It goes on neither clipboard and is
+    /// left out of ``inputTally``'s text.
+    public func typePassword(_ password: String) {
+        guard acceptsInput, !password.isEmpty else { return }
+        // A modifier still down on the remote machine would make shortcuts of the characters.
+        if !uiState.modifiers.isEmpty || hasHeldKeys { releaseAllInput() }
+        for event in translator.events(forInsertedText: password, modifiers: []) { deliver(event, isSecret: true) }
+        // Counted when it has gone: behind a paste on its way, it waits with its events.
+        if pastesInFlight > 0 {
+            heldDuringPaste.append(.passwordEnd)
+        } else {
+            inputTally.notePassword()
+        }
+    }
+
+    /// Whether there is a password for the computer itself to type. See ``pasteLoginPassword()``.
+    /// Never on a rung that speaks another protocol than the computer's own: like the sign-in
+    /// there, what is typed over it gets nothing from the computer's saved or cached credentials.
+    public var hasLoginPassword: Bool { acceptsInput && !isOnFallbackRung && prompts.hasLoginPassword }
+
+    /// Types the computer's own password at the remote machine: the one sent when signing in, else
+    /// the saved one. The device owner is asked first if the password requires them.
+    public func pasteLoginPassword() {
+        guard hasLoginPassword else { return }
+        let token = attempt
+        Task { [weak self] in
+            guard let password = await self?.prompts.loginPassword() else { return }
+            guard let self, self.attempt == token else { return }
+            self.typePassword(password)
+        }
+    }
+
     /// Whether ⌘V on a hardware keyboard should come to ``pasteFromHardwareKeyboard(_:)`` (through
     /// the responder's `paste(_:)`, which gets the clipboard without a prompt) rather than travel as
     /// plain keys.
@@ -1694,7 +1747,7 @@ public final class SessionModel: Identifiable {
             }
             self.pastesInFlight -= 1
             if sent, self.attempt == token, self.acceptsInput {
-                for event in keys.events { self.transmit(event) }
+                for event in keys.events { self.transmit(event, isSecret: false) }
                 if keys.usesOneShots { self.consumeOneShotModifiers() }
             }
             self.releaseHeldInput()
@@ -1737,7 +1790,7 @@ public final class SessionModel: Identifiable {
         for event in events { deliver(event) }
     }
 
-    private func deliver(_ event: InputEvent) {
+    private func deliver(_ event: InputEvent, isSecret: Bool = false) {
         switch event {
         case .pointer(let pointer):
             // While a drag of this device's files is over the picture, its place is the pointer's
@@ -1751,15 +1804,23 @@ public final class SessionModel: Identifiable {
             break
         }
         if pastesInFlight > 0 {
-            heldDuringPaste.append(event)
+            heldDuringPaste.append(.event(event, isSecret: isSecret))
             return
         }
-        transmit(event)
+        transmit(event, isSecret: isSecret)
     }
 
-    private func transmit(_ event: InputEvent) {
+    /// What waits for a paste on its way.
+    private enum HeldInput {
+        case event(InputEvent, isSecret: Bool)
+        /// The events of one password are all before this.
+        case passwordEnd
+    }
+
+    /// `isSecret` keeps a password's characters out of ``inputTally``.
+    private func transmit(_ event: InputEvent, isSecret: Bool) {
         guard let input = session?.input else { return }
-        inputTally.note(event)
+        if !isSecret { inputTally.note(event) }
         input.send(event)
     }
 
@@ -1769,7 +1830,12 @@ public final class SessionModel: Identifiable {
         let held = heldDuringPaste
         heldDuringPaste.removeAll()
         guard acceptsInput else { return }
-        for event in held { transmit(event) }
+        for item in held {
+            switch item {
+            case .event(let event, let isSecret): transmit(event, isSecret: isSecret)
+            case .passwordEnd: inputTally.notePassword()
+            }
+        }
     }
 
     /// Lets go of every button and modifier, locally and on the remote machine.

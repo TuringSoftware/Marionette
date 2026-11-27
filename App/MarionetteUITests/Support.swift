@@ -1,6 +1,7 @@
 // Copyright © 2026 Turing Software, LLC
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import UIKit
 import XCTest
 
 extension XCUIApplication {
@@ -71,6 +72,26 @@ extension XCUIApplication {
             Thread.sleep(forTimeInterval: 0.8)
         }
         XCTAssertEqual(control.value as? String, title, file: file, line: line)
+    }
+
+    /// Waits for what the simulated Mac copies as it connects to reach this device's clipboard. To
+    /// the app that is its own clipboard, which it pastes without iOS asking.
+    func waitForTheMacsCopy(file: StaticString = #filePath, line: UInt = #line) {
+        let landed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in UIPasteboard.general.hasStrings }, object: nil)
+        XCTAssertEqual(XCTWaiter().wait(for: [landed], timeout: 15), .completed, "nothing reached the clipboard", file: file, line: line)
+    }
+
+    /// Opens the paste control's menu (press and hold).
+    func openPasteMenu() {
+        showControls()
+        buttons["toolbar-paste"].waitToExist().press(forDuration: 1.0)
+    }
+
+    /// An item of the paste control's menu: "From Clipboard", "Password…" or "Login Password". Found
+    /// by its title, as the keyboard control's are: in a menu's section the items lose their
+    /// accessibility identifiers (iOS 27.0 iPad simulator).
+    func pasteMenuItem(_ title: String) -> XCUIElement {
+        buttons[title].firstMatch
     }
 
     /// Types a plain "b" at the remote computer and makes sure it arrived. The simulators lose the

@@ -405,7 +405,8 @@ final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDelegate {
             return
         }
         var top = max(keyboard.minY, bounds.minY)
-        if let accessory, showsSoftwareKeyboard {
+        // The bar comes with this view's keyboard only, not with one another field brought up.
+        if let accessory, showsSoftwareKeyboard, isFirstResponder {
             if notification.name == UIResponder.keyboardDidChangeFrameNotification, let accessoryWindow = accessory.window {
                 let frame = convert(accessory.convert(accessory.bounds, to: accessoryWindow.screen.coordinateSpace), from: window.screen.coordinateSpace)
                 keyboardFrameOmitsAccessory = frame.minY < keyboard.minY - 1

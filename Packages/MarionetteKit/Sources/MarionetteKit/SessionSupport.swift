@@ -161,6 +161,8 @@ public struct InputTally: Sendable, Hashable {
     public private(set) var scrolls = 0
     /// Fingers that landed on a remote machine that takes touches.
     public private(set) var touches = 0
+    /// Passwords typed. Their characters are not kept in ``typed``.
+    public private(set) var passwords = 0
     private var buttons: PointerButtons = []
     private var touching: Set<Int> = []
 
@@ -194,9 +196,23 @@ public struct InputTally: Sendable, Hashable {
         }
     }
 
+    mutating func notePassword() {
+        passwords += 1
+    }
+
     /// One line, for an accessibility value.
     public var summary: String {
-        String(localized: "typed “\(typed)”, \(keyPresses) key presses, \(clicks) clicks, \(secondaryClicks) secondary clicks, \(scrolls) scrolls, \(touches) touches", bundle: #bundle)
+        String(localized: "typed “\(typed)”, \(keyPresses) key presses, \(clicks) clicks, \(secondaryClicks) secondary clicks, \(scrolls) scrolls, \(touches) touches, \(passwords) passwords", bundle: #bundle)
+    }
+}
+
+/// The field for a password to type at the remote machine.
+public enum PasswordEntry {
+    /// Whether a change to the field's text is a whole password arriving at once, from the system's
+    /// password AutoFill or a paste, rather than a character typed. It is sent without waiting for
+    /// Return.
+    public static func isWholePassword(from old: String, to new: String) -> Bool {
+        old.isEmpty && new.count > 1
     }
 }
 

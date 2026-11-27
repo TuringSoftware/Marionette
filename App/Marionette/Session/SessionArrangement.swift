@@ -38,6 +38,9 @@ struct SessionArrangement<Stage: View, Deck: View>: View {
             }
             .onChange(of: context.pose, initial: true) { _, pose in onPoseChange(pose) }
         }
+        // The stand-in's fold is half the height offered here; a real fold does not move when a
+        // keyboard comes up.
+        .ignoresSafeArea(foldOverride == nil ? [] : .keyboard)
     }
 
     @ViewBuilder
@@ -125,5 +128,8 @@ private struct DockedArrangement<Stage: View, Deck: View>: View {
                     .frame(maxHeight: .infinity)
             }
         }
+        // The panes are the fold's, whatever comes up over them: a system keyboard covers the deck
+        // rather than squeeze both panes into what it leaves above itself.
+        .ignoresSafeArea(.keyboard)
     }
 }

@@ -131,8 +131,8 @@ struct ControlStrip: View {
         return layout {
             inputModeButton
             inputPanelButton
-            if session.clipboard.isAvailable && session.acceptsInput {
-                SessionPasteControl(session: session)
+            if session.acceptsInput {
+                SessionPasteControl(session: session, tipArrowEdge: vertical ? (barEdge == .leading ? .leading : .trailing) : .bottom)
             }
             StripDivider(vertical: vertical)
             // Screen Sharing's two zooms: Scale to Fit, which keeps the picture fitted through

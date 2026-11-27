@@ -120,6 +120,13 @@ struct MarionetteCommands: Commands {
                         .disabled(session?.uiState.isDeckDocked == true && !panel.isAvailableDocked)
                 }
             }
+            Menu("Paste") {
+                Button("From Clipboard") { session?.pasteDeviceClipboard() }
+                Button("Password…") { session?.setPasswordEntryPresented(true) }
+                Button("Login Password") { session?.pasteLoginPassword() }
+                    .disabled(session?.hasLoginPassword != true)
+            }
+            .disabled(session?.acceptsInput != true)
             Divider()
             Button("Scale to Fit") { session?.setScaleToFit(true) }
                 .disabled(session == nil || session?.uiState.zoomMode == .fit)

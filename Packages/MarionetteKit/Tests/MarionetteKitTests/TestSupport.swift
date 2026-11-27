@@ -70,6 +70,7 @@ struct Fixture {
     var controlsHandleTimeout: Duration? = .seconds(4)
     /// Where received files go; the temporary directory when `nil`.
     var downloadsDirectory: URL?
+    var owner: OwnerAuthentication = .simulated
 
     init(_ scenarios: [SimulationScenario] = [fastScenario()], claimedModes: [SessionMode]? = nil, savePassword: Bool = true) throws {
         backend = RecordingBackend(scenarios, claimedModes: claimedModes)
@@ -101,6 +102,7 @@ struct Fixture {
         dependencies.reconnection = reconnection
         dependencies.clipboardPollInterval = clipboardPollInterval
         dependencies.controlsHandleTimeout = controlsHandleTimeout
+        dependencies.owner = owner
         if let downloadsDirectory { dependencies.downloadsDirectory = { downloadsDirectory } }
         return SessionModel(computer: computer, dependencies: dependencies)
     }
