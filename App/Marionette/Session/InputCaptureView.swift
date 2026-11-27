@@ -395,22 +395,40 @@ final class InputCaptureView: UIView, UIKeyInput, UIPointerInteractionDelegate {
     /// Whether the system's keyboard frame excludes the bar of Mac keys (iOS 27 floats the bar above
     /// the keyboard; iOS 26 includes it). Learned from where the bar really is.
     private var keyboardFrameOmitsAccessory = false
+    /// Where the bar's top stood for each keyboard frame reported since the keyboard came up, as
+    /// measured once the frame had been taken up.
+    private var measuredTops: [(keyboard: CGRect, top: CGFloat)] = []
 
     @objc private func keyboardFrameChanged(_ notification: Notification) {
         guard let window, let end = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
         let hidden = notification.name == UIResponder.keyboardWillHideNotification
         let keyboard = convert(end, from: window.screen.coordinateSpace)
         guard !hidden, keyboard.height > 0 else {
+            measuredTops = []
             session?.setKeyboardOverlap(0)
             return
         }
         var top = max(keyboard.minY, bounds.minY)
         // The bar comes with this view's keyboard only, not with one another field brought up.
         if let accessory, showsSoftwareKeyboard, isFirstResponder {
+            func isSame(_ frame: CGRect) -> Bool {
+                abs(frame.minY - keyboard.minY) <= 1 && abs(frame.height - keyboard.height) <= 1 && abs(frame.width - keyboard.width) <= 1
+            }
             if notification.name == UIResponder.keyboardDidChangeFrameNotification, let accessoryWindow = accessory.window {
                 let frame = convert(accessory.convert(accessory.bounds, to: accessoryWindow.screen.coordinateSpace), from: window.screen.coordinateSpace)
                 keyboardFrameOmitsAccessory = frame.minY < keyboard.minY - 1
                 top = min(top, max(frame.minY, bounds.minY))
+                measuredTops.removeAll { isSame($0.keyboard) }
+                measuredTops.append((keyboard, top))
+                // A floating keyboard dragged about reports a frame wherever it is let go.
+                if measuredTops.count > 8 { measuredTops.removeFirst() }
+            } else if let measured = measuredTops.first(where: { isSame($0.keyboard) }) {
+                // A frame seen before has the top it had then, whatever the last frame said about
+                // the bar. An open menu makes the system report the keyboard by turns without and
+                // with its bar (iPhone Duo's outer display, iOS 27.1); a guess that differs between
+                // them would move the control strip at every report, and a strip that moves
+                // rebuilds its menu, which then cannot be scrolled.
+                top = measured.top
             } else if keyboardFrameOmitsAccessory {
                 top -= KeyboardAccessoryView.height
             }
