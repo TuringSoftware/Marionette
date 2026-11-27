@@ -52,6 +52,9 @@ struct SupportSheet: View {
                             .productViewStyle(.compact)
                             // The text above has said what it is for.
                             .productDescription(.hidden)
+                            // StoreKit's own capsule is filled with the row's colour in dark mode.
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.capsule)
                             .accessibilityIdentifier("donation")
                     }
                 } footer: {
